@@ -1,7 +1,12 @@
+#undef _GLIBCXX_USE_INT128
+#undef _GLIBCXX_ATOMIC_BUILTINS
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <thrust/reduce.h>
+#include <thrust/device_ptr.h>
 #include "paired_cuda.h"
 
 #define MAX_THREADS_PER_BLOCK 512
@@ -45,25 +50,27 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
   
   // replace non-existant variable
   __shared__ double cache[MAX_THREADS_PER_BLOCK];
-
+  
   int cache_index = (blockDim.x * threadIdx.y) + threadIdx.x;
 
   cache[cache_index] = 0;
-
+  
   __syncthreads();
   
-  int seq_index = blockDim.y * (blockIdx.y * gridDim.x + blockIdx.x) + threadIdx.y;
+  int block_seq_index = blockDim.y * (blockIdx.y * gridDim.x + blockIdx.x);
+  int seq_index = block_seq_index + threadIdx.y;
+  
   int rvd_index = (STRAND == 1 ? rs_len - threadIdx.x - 1 : threadIdx.x);
 
   if (rvd_index < 0 || rvd_index >= rs_len) return;
-  if (seq_index < 1 || seq_index >= is_length  || seq_index + rs_len >= is_length - 1) return;
+  if (seq_index < 1 || seq_index >= is_length || seq_index + rs_len >= is_length - 1) return;
   if (STRAND == 0 && input_sequence[seq_index - 1] != 'T' && input_sequence[seq_index - 1] != 't') return;
   if (STRAND == 1 && input_sequence[seq_index + rs_len] != 'A' && input_sequence[seq_index + rs_len] != 'a') return;
   
   int sm_col = 0;
 
   char base = input_sequence[seq_index + threadIdx.x];
-
+  
   if (base == 'A' || base == 'a')    
     sm_col = (STRAND == 1 ? 3 : 0);
   if (base == 'C' || base == 'c')
@@ -99,7 +106,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
 
 
 template< unsigned int UPSHIFT, unsigned int DOWNSHIFT, unsigned int COMBO >
-__global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_length, unsigned int rs_len, unsigned int spacer_range_start, unsigned int spacer_range_end, unsigned int *final_results) {
+__global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_length, unsigned int rs_len, unsigned int spacer_range_start, unsigned int spacer_range_end, unsigned int *second_results) {
   
   __shared__ int cache[MAX_THREADS_PER_BLOCK];
 
@@ -155,19 +162,21 @@ __global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_leng
       i /= 2;
   }
   
+  if (threadIdx.x == 0)
+    second_results[seq_index] += cache[cache_index];
   
-  i = blockDim.y / 2;
+//  i = blockDim.y / 2;
 
-  while (i != 0) {
-      if (threadIdx.y < i)
-          cache[cache_index] += cache[cache_index + (i * blockDim.x)];
-      __syncthreads();
-      i /= 2;
-  }
+//  while (i != 0) {
+//      if (threadIdx.y < i)
+//          cache[cache_index] += cache[cache_index + (i * blockDim.x)];
+//      __syncthreads();
+//      i /= 2;
+//  }
   
 
-  if (threadIdx.x == 0 && threadIdx.y == 0)
-    atomicAdd(final_results + COMBO, cache[cache_index]);
+//  if (threadIdx.x == 0 && threadIdx.y == 0)
+//    atomicAdd(final_results + COMBO, cache[cache_index]);
   
 }
 
@@ -207,11 +216,12 @@ void RunCountBindingSites(char *reference_sequence, unsigned long reference_sequ
   //size_t free, total;
   
   unsigned char *d_prelim_results;
+  unsigned int *d_second_results;
   char *d_reference_sequence;
   unsigned int *d_rvd_sequence;
   unsigned int *d_rvd_sequence2;
   
-  unsigned int *d_results;
+  //unsigned int *d_results;
   
   double *d_scoring_matrix;
   
@@ -245,6 +255,8 @@ void RunCountBindingSites(char *reference_sequence, unsigned long reference_sequ
   cudaSafeCall( cudaMalloc(&d_prelim_results, reference_sequence_length * sizeof(unsigned char)) );
   cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
 
+  cudaSafeCall( cudaMalloc(&d_second_results, reference_sequence_length * sizeof(unsigned int)) );
+  cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
 
   //cudaSafeCall( cudaMalloc(&d_prelim_result_scores, reference_sequence_length * sizeof(double)) );
   //cudaSafeCall( cudaMemset(d_prelim_result_scores, '\0', reference_sequence_length * sizeof(double)) );
@@ -266,7 +278,7 @@ void RunCountBindingSites(char *reference_sequence, unsigned long reference_sequ
   cudaSafeCall( cudaMemcpy(d_rvd_sequence2, rvd_sequences[1], rvd_sequence_lengths[1] * sizeof(unsigned int), cudaMemcpyHostToDevice) );
 
   // Results
-  cudaSafeCall( cudaMalloc(&d_results, 4 * sizeof(unsigned int)) );
+  //cudaSafeCall( cudaMalloc(&d_results, 4 * sizeof(unsigned int)) );
   
   // Scoring Matrix
   
@@ -285,12 +297,12 @@ void RunCountBindingSites(char *reference_sequence, unsigned long reference_sequ
   
   unsigned int h_results[4];
   
-  h_results[0] = 0;
-  h_results[1] = 0;
-  h_results[2] = 0;
-  h_results[3] = 0;
+//  h_results[0] = 0;
+//  h_results[1] = 0;
+//  h_results[2] = 0;
+//  h_results[3] = 0;
   
-  cudaSafeCall( cudaMemcpy(d_results, h_results, sizeof(unsigned int) * 4, cudaMemcpyHostToDevice) );
+  //cudaSafeCall( cudaMemcpy(d_results, h_results, sizeof(unsigned int) * 4, cudaMemcpyHostToDevice) );
   
   cudaSafeCall( cudaEventRecord(stop, 0) );
   cudaSafeCall( cudaEventSynchronize(stop) );
@@ -387,23 +399,39 @@ void RunCountBindingSites(char *reference_sequence, unsigned long reference_sequ
   
   dim3 tally_threadsPerBlock(next_p2(spacer_sizes[1] - spacer_sizes[0] + 1), 16);
   
-  TallyResults <0, 1, 0> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_results);
+  
+  thrust::device_ptr<unsigned int> second_results_start(d_second_results);
+  thrust::device_ptr<unsigned int> second_results_end(d_second_results + reference_sequence_length);
+  
+  
+  TallyResults <0, 1, 0> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_second_results);
   //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
   cudaSafeCall( cudaGetLastError() );
   
-  TallyResults <0, 3, 1> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_results);
+  h_results[0] = thrust::reduce(second_results_start, second_results_end);
+  //cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
+  
+  TallyResults <0, 3, 1> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_second_results);
   //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
   cudaSafeCall( cudaGetLastError() );
   
-  TallyResults <2, 1, 2> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_results);
+  h_results[1] = thrust::reduce(second_results_start, second_results_end);
+  //cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
+  
+  TallyResults <2, 1, 2> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_second_results);
   //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
   cudaSafeCall( cudaGetLastError() );
   
-  TallyResults <2, 3, 3> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_results);
+  h_results[2] = thrust::reduce(second_results_start, second_results_end);
+  //cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
+  
+  TallyResults <2, 3, 3> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_second_results);
   //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
   cudaSafeCall( cudaGetLastError() );
   
-  cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(unsigned int), cudaMemcpyDeviceToHost) );
+  h_results[3] = thrust::reduce(second_results_start, second_results_end);
+  
+  //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(unsigned int), cudaMemcpyDeviceToHost) );
   cudaSafeCall( cudaGetLastError() );
   
   cudaSafeCall( cudaEventRecord(stop, 0) );
@@ -424,10 +452,11 @@ void RunCountBindingSites(char *reference_sequence, unsigned long reference_sequ
   printf("%d %d %d %d\n", h_results[0], h_results[1], h_results[2], h_results[3]);
   
   cudaSafeCall( cudaFree(d_prelim_results) );
+  cudaSafeCall( cudaFree(d_second_results) );
   cudaSafeCall( cudaFree(d_reference_sequence) );
   cudaSafeCall( cudaFree(d_rvd_sequence) );
   cudaSafeCall( cudaFree(d_rvd_sequence2) );
-  cudaSafeCall( cudaFree(d_results) );
+  //cudaSafeCall( cudaFree(d_results) );
   cudaSafeCall( cudaFree(d_scoring_matrix) );
   
 }
