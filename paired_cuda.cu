@@ -9,7 +9,12 @@
 #include <thrust/device_ptr.h>
 #include "paired_cuda.h"
 
-#define MAX_THREADS_PER_BLOCK 512
+// Sequence handling
+#include <zlib.h>
+#include "kseq.h"
+KSEQ_INIT(gzFile, gzread)
+
+#define MAX_THREADS_PER_BLOCK 1024
 #define MAX_BLOCKS_PER_GRID 65535
 
 #define cudaSafeCall(call){   \
@@ -19,164 +24,95 @@
     exit(EXIT_FAILURE);       \
 }}
 
-#define imin(a,b) (a<b?a:b)
-
-unsigned int next_p2(unsigned int v) {
-
-  v--;
-  
-  v |= v >> 1;
-  v |= v >> 2;
-  v |= v >> 4;
-  v |= v >> 8;
-  v |= v >> 16;
-  
-  #if __x86_64__
-  v |= v >> 32;
-  #endif
-  
-  v++;
-  
-  return v;
-  
-}
-
 __device__ double ScoringMatrixVal(double *scoring_matrix, size_t pitch, unsigned int row, unsigned int column);
 double *ScoringMatrixRow(double *scoring_matrix, size_t pitch, unsigned int row);
 
-
-template< unsigned int STRAND, unsigned int RVD_NUM >
+template< unsigned int STRAND >
 __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length, unsigned int *rvd_sequence, unsigned int rs_len, double cutoff, double *scoring_matrix, size_t sm_pitch, unsigned char *results) {
+   
+  int block_seq_index = MAX_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
+  int seq_index = block_seq_index + (blockDim.x * threadIdx.y) + threadIdx.x;
   
-  // replace non-existant variable
-  __shared__ double cache[MAX_THREADS_PER_BLOCK];
-  
-  int cache_index = (blockDim.x * threadIdx.y) + threadIdx.x;
-
-  cache[cache_index] = 0;
-  
-  __syncthreads();
-  
-  int block_seq_index = blockDim.y * (blockIdx.y * gridDim.x + blockIdx.x);
-  int seq_index = block_seq_index + threadIdx.y;
-  
-  int rvd_index = (STRAND == 1 ? rs_len - threadIdx.x - 1 : threadIdx.x);
-
-  if (rvd_index < 0 || rvd_index >= rs_len) return;
   if (seq_index < 1 || seq_index >= is_length || seq_index + rs_len >= is_length - 1) return;
   if (STRAND == 0 && input_sequence[seq_index - 1] != 'T' && input_sequence[seq_index - 1] != 't') return;
   if (STRAND == 1 && input_sequence[seq_index + rs_len] != 'A' && input_sequence[seq_index + rs_len] != 'a') return;
   
-  int sm_col = 0;
-
-  char base = input_sequence[seq_index + threadIdx.x];
+  double thread_result = 0;
   
-  if (base == 'A' || base == 'a')    
-    sm_col = (STRAND == 1 ? 3 : 0);
-  if (base == 'C' || base == 'c')
-    sm_col = (STRAND == 1 ? 2 : 1);
-  if (base == 'G' || base == 'g')
-    sm_col = (STRAND == 1 ? 1 : 2);
-  if (base == 'T' || base == 't')
-    sm_col = (STRAND == 1 ? 0 : 3);
-  
-  cache[cache_index] = ScoringMatrixVal(scoring_matrix, sm_pitch, rvd_sequence[rvd_index], sm_col);
-  
-  __syncthreads();
-  
-  // for reductions, threadsPerBlock must be a power of 2
-  // because of the following code
-  
-  int i = blockDim.x / 2;
-  
-  while (i != 0) {
-      if (threadIdx.x < i)
-          cache[cache_index] += cache[cache_index + i];
+  if (STRAND == 0) {
+    
+    for (int i = 0; i < rs_len; i++) {
+      
+      int rvd_index = i;
+      
+      int sm_col = 0;
+      
+      char base = input_sequence[seq_index + i];
+      
+      if (base == 'A' || base == 'a')    
+        sm_col = 0;
+      if (base == 'C' || base == 'c')
+        sm_col = 1;
+      if (base == 'G' || base == 'g')
+        sm_col = 2;
+      if (base == 'T' || base == 't')
+        sm_col = 3;
+      
+      thread_result += ScoringMatrixVal(scoring_matrix, sm_pitch, rvd_sequence[rvd_index], sm_col);
+      
       __syncthreads();
-      i /= 2;
+      
+    }
+    
+  } else {
+    
+    for (int i = 0; i < rs_len; i++) {
+      
+      int rvd_index = rs_len - i - 1;
+      
+      int sm_col = 0;
+      
+      char base = input_sequence[seq_index + i];
+      
+      if (base == 'A' || base == 'a')    
+        sm_col = 3;
+      if (base == 'C' || base == 'c')
+        sm_col = 2;
+      if (base == 'G' || base == 'g')
+        sm_col = 1;
+      if (base == 'T' || base == 't')
+        sm_col = 0;
+      
+      thread_result += ScoringMatrixVal(scoring_matrix, sm_pitch, rvd_sequence[rvd_index], sm_col);
+      
+      __syncthreads();
+      
+    }
+    
   }
   
-  if (threadIdx.x == 0 && cache[cache_index] < cutoff) {// && cache[0] < cutoff)
-    results[seq_index] |= (1UL << (2 * RVD_NUM + STRAND));
-  }
-  
-  __syncthreads();
+  results[seq_index] = (thread_result < cutoff);
   
 }
 
-
-template< unsigned int UPSHIFT, unsigned int DOWNSHIFT, unsigned int COMBO >
-__global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_length, unsigned int rs_len, unsigned int spacer_range_start, unsigned int spacer_range_end, unsigned int *second_results) {
+__global__ void TallyResults(unsigned char *prelim_results, unsigned char *prelim_results2, unsigned int pr_length, unsigned int rs_len, unsigned int spacer_range_start, unsigned int spacer_range_end, unsigned int *second_results) {
+    
+  int thread_result = 0;
   
-  __shared__ int cache[MAX_THREADS_PER_BLOCK];
-
-  int cache_index = (blockDim.x * threadIdx.y) + threadIdx.x;
-
-  cache[cache_index] = 0;
+  int block_seq_index = MAX_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
+  int seq_index = block_seq_index + (blockDim.x * threadIdx.y) + threadIdx.x;
   
-  int spacer_size = spacer_range_start + threadIdx.x;
-  int seq_index = blockDim.y * (blockIdx.y * gridDim.x + blockIdx.x) + threadIdx.y;
+  if (seq_index < 0 || seq_index >= pr_length) return;
   
-  if (spacer_size > spacer_range_end) return;
-  if (seq_index >= pr_length  || seq_index + spacer_size + rs_len >= pr_length) return;
-  
-  // 0 f rvd1 r rvd1 
-  // 1 f rvd1 r rvd2 
-  // 2 f rvd2 r rvd1 
-  // 3 f rvd2 r rvd2 
-
-//  int u_shift;
-//  int d_shift;
-
-//  if (COMBO == 0) {
-//    u_shift = 0;
-//    d_shift = 1;
-//  } else if (COMBO == 1) {
-//    u_shift = 0;
-//    d_shift = 3;
-//  } else if (COMBO == 2) {
-//    u_shift = 2;
-//    d_shift = 1;
-//  } else {
-//    u_shift = 2;
-//    d_shift = 3;
-//  }
-  
-  cache[cache_index] = prelim_results[seq_index] & (1UL << UPSHIFT) &&
-                       prelim_results[seq_index + rs_len + spacer_size] & (1UL << DOWNSHIFT);
-  
-  //if (seq_index == 17505324 && spacer_size == 18)
-  //  while (true) break;
-  
-  __syncthreads();
-
-  // for reductions, threadsPerBlock must be a power of 2
-  // because of the following code
-
-  int i = blockDim.x / 2;
-
-  while (i != 0) {
-      if (threadIdx.x < i)
-          cache[cache_index] += cache[cache_index + i];
-      __syncthreads();
-      i /= 2;
+  for (int i = spacer_range_start; i <= spacer_range_end; i++) {
+    
+    if (seq_index + rs_len + i >= pr_length) continue;
+    
+    thread_result += (prelim_results[seq_index] && 
+                      prelim_results2[seq_index + rs_len + i]);
   }
   
-  if (threadIdx.x == 0)
-    second_results[seq_index] += cache[cache_index];
-  
-//  i = blockDim.y / 2;
-
-//  while (i != 0) {
-//      if (threadIdx.y < i)
-//          cache[cache_index] += cache[cache_index + (i * blockDim.x)];
-//      __syncthreads();
-//      i /= 2;
-//  }
-  
-
-//  if (threadIdx.x == 0 && threadIdx.y == 0)
-//    atomicAdd(final_results + COMBO, cache[cache_index]);
+  second_results[seq_index] = thread_result;
   
 }
 
@@ -203,261 +139,185 @@ void printDeviceMatrix(double *matrix, int width, int length) {
 
 void printHostMatrix(double **array, int width, int length) {
   for (int y = 0; y < length; y++) {
-    printf("[%.2f, %.2f, %.2f, %.2f]\n",
+    printf("[%.2f, %.2f, %.2f, %.2f, %.2f]\n",
            array[y][0],
            array[y][1],
            array[y][2],
-           array[y][3]);
+           array[y][3],
+           array[y][4]);
   }
 }
 
-void RunCountBindingSites(char *reference_sequence, unsigned long reference_sequence_length, unsigned int *spacer_sizes, unsigned int **rvd_sequences, unsigned int *rvd_sequence_lengths, double *cutoffs, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int **results) {
-   
-  //size_t free, total;
+void printRvdArray(unsigned int *array) {
+  for (int y = 0; y < 32; y++) {
+    printf("%du ", array[y]);
+  }
+  printf("\n");
+}
+
+void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsigned int **rvd_sequences, unsigned int *rvd_sequence_lengths, double *cutoffs, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int **results) {
   
-  unsigned char *d_prelim_results;
-  unsigned int *d_second_results;
-  char *d_reference_sequence;
   unsigned int *d_rvd_sequence;
   unsigned int *d_rvd_sequence2;
-  
-  //unsigned int *d_results;
-  
   double *d_scoring_matrix;
-  
-  cudaEvent_t start, stop;
-  
-  float elapsed;
-  
-  cudaSafeCall( cudaEventCreate(&start) );
-  cudaSafeCall( cudaEventCreate(&stop) );
-  
-  printf("Loading input sequence\n");
-  
-  cudaSafeCall( cudaEventRecord(start, 0) );
-
-  //double *h_scoring_matrix;
-
-  //double *d_prelim_result_scores;
-  //unsigned char *h_prelim_results;
-  //double *h_prelim_result_scores;
-
-  //unsigned char *h_prelim_results;
-  
-  // Input Sequence
-  
-  //cudaMemGetInfo(&free, &total);
-  //printf("%d KB free of total %d KB\n", free/1024, total/1024);
-  
-  cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_sequence_length * sizeof(char)) );
-  cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
-
-  cudaSafeCall( cudaMalloc(&d_prelim_results, reference_sequence_length * sizeof(unsigned char)) );
-  cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
-
-  cudaSafeCall( cudaMalloc(&d_second_results, reference_sequence_length * sizeof(unsigned int)) );
-  cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
-
-  //cudaSafeCall( cudaMalloc(&d_prelim_result_scores, reference_sequence_length * sizeof(double)) );
-  //cudaSafeCall( cudaMemset(d_prelim_result_scores, '\0', reference_sequence_length * sizeof(double)) );
-
-  //h_prelim_result_scores = (double *) malloc(reference_sequence_length * sizeof(double));
-  //h_prelim_results = (unsigned char *) malloc(reference_sequence_length * sizeof(unsigned char));
-
-  
-  
-  
-  // RVD Sequences
-  //cudaMemGetInfo(&free, &total);
-  //printf("%d KB free of total %d KB\n", free/1024, total/1024);
-
-  cudaSafeCall( cudaMalloc(&d_rvd_sequence, rvd_sequence_lengths[0] * sizeof(unsigned int)));
-  cudaSafeCall( cudaMemcpy(d_rvd_sequence, rvd_sequences[0], rvd_sequence_lengths[0] * sizeof(unsigned int), cudaMemcpyHostToDevice) );
-
-  cudaSafeCall( cudaMalloc(&d_rvd_sequence2, rvd_sequence_lengths[1] * sizeof(unsigned int)));
-  cudaSafeCall( cudaMemcpy(d_rvd_sequence2, rvd_sequences[1], rvd_sequence_lengths[1] * sizeof(unsigned int), cudaMemcpyHostToDevice) );
-
-  // Results
-  //cudaSafeCall( cudaMalloc(&d_results, 4 * sizeof(unsigned int)) );
-  
-  // Scoring Matrix
-  
   size_t sm_pitch;
-  
+  cudaEvent_t start, stop;
+  float elapsed;
+
+  cudaSafeCall( cudaMalloc(&d_rvd_sequence, 32 * sizeof(unsigned int)));
+  cudaSafeCall( cudaMemcpy(d_rvd_sequence, rvd_sequences[0], 32 * sizeof(unsigned int), cudaMemcpyHostToDevice) );
+
+  cudaSafeCall( cudaMalloc(&d_rvd_sequence2, 32 * sizeof(unsigned int)));
+  cudaSafeCall( cudaMemcpy(d_rvd_sequence2, rvd_sequences[1], 32 * sizeof(unsigned int), cudaMemcpyHostToDevice) );
+    
   cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 4 * sizeof(double), scoring_matrix_length * sizeof(double)) );
   
   for (unsigned int i = 0; i < scoring_matrix_length; i++) {
     cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(double) * 4, cudaMemcpyHostToDevice) );
   }
+  
+  dim3 threadsPerBlock(32, 32);
+  
+  gzFile seqfile = gzopen(seq_filename, "r");
 
-  //h_scoring_matrix = (double *) malloc(sm_pitch * scoring_matrix_length * sizeof(double));
+  kseq_t *seq = kseq_init(seqfile);
+  int result;
 
-  //cudaSafeCall( cudaMemcpy(h_scoring_matrix, d_scoring_matrix, sm_pitch * scoring_matrix_length * sizeof(double), cudaMemcpyDeviceToHost) );
+  while ((result = kseq_read(seq)) >= 0) {
+    
+    unsigned char *d_prelim_results;
+    unsigned char *d_prelim_results2;
+    unsigned char *d_prelim_results3;
+    unsigned char *d_prelim_results4;
+    unsigned int *d_second_results;
+    char *d_reference_sequence;
+    unsigned int h_results[4];
+    
+    char *reference_sequence = seq->seq.s;
+    
+    for (int i = seq->seq.l; i < seq->seq.m; i++) {
+      reference_sequence[i] = 'X';
+    }
+    
+    reference_sequence[seq->seq.m - 1] = '\0';
+    
+    unsigned long reference_sequence_length = seq->seq.m;
+    
+    cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_sequence_length * sizeof(char)) );
+    cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
+  
+    cudaSafeCall( cudaMalloc(&d_prelim_results, reference_sequence_length * sizeof(unsigned char)) );
+    cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
+    
+    cudaSafeCall( cudaMalloc(&d_prelim_results2, reference_sequence_length * sizeof(unsigned char)) );
+    cudaSafeCall( cudaMemset(d_prelim_results2, '\0', reference_sequence_length * sizeof(unsigned char)) );
+    
+    cudaSafeCall( cudaMalloc(&d_prelim_results3, reference_sequence_length * sizeof(unsigned char)) );
+    cudaSafeCall( cudaMemset(d_prelim_results3, '\0', reference_sequence_length * sizeof(unsigned char)) );
+    
+    cudaSafeCall( cudaMalloc(&d_prelim_results4, reference_sequence_length * sizeof(unsigned char)) );
+    cudaSafeCall( cudaMemset(d_prelim_results4, '\0', reference_sequence_length * sizeof(unsigned char)) );
+  
+    cudaSafeCall( cudaMalloc(&d_second_results, reference_sequence_length * sizeof(unsigned int)) );
+    cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
+    
+    thrust::device_ptr<unsigned int> second_results_start(d_second_results);
+    thrust::device_ptr<unsigned int> second_results_end(d_second_results + reference_sequence_length);
 
-  
-  unsigned int h_results[4];
-  
-//  h_results[0] = 0;
-//  h_results[1] = 0;
-//  h_results[2] = 0;
-//  h_results[3] = 0;
-  
-  //cudaSafeCall( cudaMemcpy(d_results, h_results, sizeof(unsigned int) * 4, cudaMemcpyHostToDevice) );
-  
-  cudaSafeCall( cudaEventRecord(stop, 0) );
-  cudaSafeCall( cudaEventSynchronize(stop) );
-  
-  cudaSafeCall( cudaEventElapsedTime(&elapsed, start, stop) );
-  
-  printf("%.2f ms to load sequence\n", elapsed);
-  
-  cudaSafeCall( cudaEventDestroy(stop) );
-  cudaSafeCall( cudaEventDestroy(start) );
-  
-  //(reference_sequence_length / threadsPerBlock.x) + 1
-  
+    int blocks_needed = reference_sequence_length / 1024;
+    int block_y = (blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
+    dim3 blocksPerGrid(MAX_BLOCKS_PER_GRID, block_y);
+    
+    cudaSafeCall( cudaEventCreate(&start) );
+    cudaSafeCall( cudaEventCreate(&stop) );
+    
+    cudaSafeCall( cudaEventRecord(start, 0) );
+    
+    ScoreBindingSites <0> <<<blocksPerGrid, threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence, rvd_sequence_lengths[0], cutoffs[0], d_scoring_matrix, sm_pitch, d_prelim_results);
+    cudaSafeCall( cudaGetLastError() );
+    
+    ScoreBindingSites <1> <<<blocksPerGrid, threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence, rvd_sequence_lengths[0], cutoffs[0], d_scoring_matrix, sm_pitch, d_prelim_results2);
+    cudaSafeCall( cudaGetLastError() );
 
+    ScoreBindingSites <0> <<<blocksPerGrid, threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence2, rvd_sequence_lengths[1], cutoffs[1], d_scoring_matrix, sm_pitch, d_prelim_results3);
+    cudaSafeCall( cudaGetLastError() );
 
-  //printf("blocksPerGrid %dx%d\n", blocksPerGrid.x, blocksPerGrid.y);
+    ScoreBindingSites <1> <<<blocksPerGrid, threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence2, rvd_sequence_lengths[1], cutoffs[1], d_scoring_matrix, sm_pitch, d_prelim_results4);
+    cudaSafeCall( cudaGetLastError() );
+    
+    cudaSafeCall( cudaDeviceSynchronize() );
+    
+    cudaSafeCall( cudaEventRecord(stop, 0) );
+    cudaSafeCall( cudaEventSynchronize(stop) );
+    cudaSafeCall( cudaEventElapsedTime(&elapsed, start, stop) );
+    
+    printf("%.2f ms to score binding sites\n", elapsed);
+    
+    cudaSafeCall( cudaEventDestroy(stop) );
+    cudaSafeCall( cudaEventDestroy(start) );
+    
+    
+    cudaSafeCall( cudaEventCreate(&start) );
+    cudaSafeCall( cudaEventCreate(&stop) );
+    
+    cudaSafeCall( cudaEventRecord(start, 0) );
+    
+    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results, d_prelim_results2, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_second_results);
+    cudaSafeCall( cudaGetLastError() );
+    
+    h_results[0] = thrust::reduce(second_results_start, second_results_end);
+    cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
+    
+    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results, d_prelim_results4, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_second_results);
+    cudaSafeCall( cudaGetLastError() );
+    
+    h_results[1] = thrust::reduce(second_results_start, second_results_end);
+    cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
+    
+    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results3, d_prelim_results2, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_second_results);
+    cudaSafeCall( cudaGetLastError() );
+    
+    h_results[2] = thrust::reduce(second_results_start, second_results_end);
+    cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
+    
+    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results3, d_prelim_results4, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_second_results);
+    cudaSafeCall( cudaGetLastError() );
+    
+    h_results[3] = thrust::reduce(second_results_start, second_results_end);
+    
+    cudaSafeCall( cudaDeviceSynchronize() );
+    
+    cudaSafeCall( cudaEventRecord(stop, 0) );
+    cudaSafeCall( cudaEventSynchronize(stop) );
+    
+    cudaSafeCall( cudaEventElapsedTime(&elapsed, start, stop) );
+    
+    printf("%.2f ms to tally results\n", elapsed);
+    
+    cudaSafeCall( cudaEventDestroy(stop) );
+    cudaSafeCall( cudaEventDestroy(start) );
+  
+    results[0][0] += h_results[0];
+    results[0][1] += h_results[1];
+    results[1][0] += h_results[2];
+    results[1][1] += h_results[3];
+    
+    printf("%d %d %d %d\n", h_results[0], h_results[1], h_results[2], h_results[3]);
+    
+    cudaSafeCall( cudaFree(d_prelim_results) );
+    cudaSafeCall( cudaFree(d_prelim_results2) );
+    cudaSafeCall( cudaFree(d_prelim_results3) );
+    cudaSafeCall( cudaFree(d_prelim_results4) );
+    cudaSafeCall( cudaFree(d_second_results) );
+    cudaSafeCall( cudaFree(d_reference_sequence) );
+    
+  }
 
-  int rvd_threadsPerBlock_x = next_p2(rvd_sequence_lengths[0]);
-  int rvd_threadsPerBlock_y = MAX_THREADS_PER_BLOCK / rvd_threadsPerBlock_x;
-  dim3 rvd_threadsPerBlock(rvd_threadsPerBlock_x, rvd_threadsPerBlock_y);
-
-  int rvd_blocks_needed = (reference_sequence_length + (rvd_threadsPerBlock_y - 1)) / rvd_threadsPerBlock_y;
-  int rvd_block_y = (rvd_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
-
-  dim3 rvd_blocksPerGrid(MAX_BLOCKS_PER_GRID, rvd_block_y);
+  kseq_destroy(seq);
+  gzclose(seqfile);
   
-  
-  int rvd2_threadsPerBlock_x = next_p2(rvd_sequence_lengths[1]);
-  int rvd2_threadsPerBlock_y = MAX_THREADS_PER_BLOCK / rvd2_threadsPerBlock_x;
-  dim3 rvd2_threadsPerBlock(rvd2_threadsPerBlock_x, rvd2_threadsPerBlock_y);
-
-  int rvd2_blocks_needed = (reference_sequence_length + (rvd2_threadsPerBlock_y - 1)) / rvd2_threadsPerBlock_y;
-  int rvd2_block_y = (rvd2_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
-
-  dim3 rvd2_blocksPerGrid(MAX_BLOCKS_PER_GRID, rvd2_block_y);
-  
-  //printf("rvd_threadsPerBlock %dx%d\n", rvd_threadsPerBlock.x, rvd_threadsPerBlock.y);
-  
-  cudaSafeCall( cudaEventCreate(&start) );
-  cudaSafeCall( cudaEventCreate(&stop) );
-  
-  cudaSafeCall( cudaEventRecord(start, 0) );
-
-  //printf("rvd2_threadsPerBlock %dx%d\n", rvd2_threadsPerBlock.x, rvd2_threadsPerBlock.y);
-
-//  ScoreBindingSites <0, 0> <<<blocksPerGrid, rvd_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence, rvd_sequence_lengths[0], cutoffs[0], d_scoring_matrix, sm_pitch, d_prelim_results, d_prelim_result_scores);
-
-  ScoreBindingSites <0, 0> <<<rvd_blocksPerGrid, rvd_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence, rvd_sequence_lengths[0], cutoffs[0], d_scoring_matrix, sm_pitch, d_prelim_results);
-  //cudaSafeCall( cudaMemcpy(h_prelim_result_scores, d_prelim_result_scores, reference_sequence_length * sizeof(double), cudaMemcpyDeviceToHost) );
-  //cudaSafeCall( cudaMemcpy(h_prelim_results, d_prelim_results, reference_sequence_length * sizeof(unsigned char), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-
-  ScoreBindingSites <1, 0> <<<rvd_blocksPerGrid, rvd_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence, rvd_sequence_lengths[0], cutoffs[0], d_scoring_matrix, sm_pitch, d_prelim_results);
-  //cudaSafeCall( cudaMemcpy(h_prelim_result_scores, d_prelim_result_scores, reference_sequence_length * sizeof(double), cudaMemcpyDeviceToHost) );
-  //cudaSafeCall( cudaMemcpy(h_prelim_results, d_prelim_results, reference_sequence_length * sizeof(unsigned char), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-
-  ScoreBindingSites <0, 1> <<<rvd2_blocksPerGrid, rvd2_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence2, rvd_sequence_lengths[1], cutoffs[1], d_scoring_matrix, sm_pitch, d_prelim_results);
-  //cudaSafeCall( cudaMemcpy(h_prelim_result_scores, d_prelim_result_scores, reference_sequence_length * sizeof(double), cudaMemcpyDeviceToHost) );
-  //cudaSafeCall( cudaMemcpy(h_prelim_results, d_prelim_results, reference_sequence_length * sizeof(unsigned char), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-
-  ScoreBindingSites <1, 1> <<<rvd2_blocksPerGrid, rvd2_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence2, rvd_sequence_lengths[1], cutoffs[1], d_scoring_matrix, sm_pitch, d_prelim_results);
-  //cudaSafeCall( cudaMemcpy(h_prelim_result_scores, d_prelim_result_scores, reference_sequence_length * sizeof(double), cudaMemcpyDeviceToHost) );
-  //cudaSafeCall( cudaMemcpy(h_prelim_results, d_prelim_results, reference_sequence_length * sizeof(unsigned char), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-  
-  
-  cudaSafeCall( cudaEventRecord(stop, 0) );
-  cudaSafeCall( cudaEventSynchronize(stop) );
-  
-  cudaSafeCall( cudaEventElapsedTime(&elapsed, start, stop) );
-  
-  printf("%.2f ms to score binding sites\n", elapsed);
-  
-  cudaSafeCall( cudaEventDestroy(stop) );
-  cudaSafeCall( cudaEventDestroy(start) );
-  
-  
-  cudaSafeCall( cudaEventCreate(&start) );
-  cudaSafeCall( cudaEventCreate(&stop) );
-  
-  cudaSafeCall( cudaEventRecord(start, 0) );
-  
-  //h_prelim_results = (unsigned char *) malloc(sizeof(unsigned char) * reference_sequence_length);
-
-  //cudaSafeCall( cudaMemcpy(h_prelim_results, d_prelim_results, sizeof(unsigned char) * reference_sequence_length, cudaMemcpyDeviceToHost) );
-  
-  int tally_blocks_needed = (reference_sequence_length + 15) / 16;
-  int tally_block_y = (tally_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
-
-  //dim3 speshul_blocksPerGrid(1, 1);
-  dim3 tally_blocksPerGrid(MAX_BLOCKS_PER_GRID, tally_block_y);
-  
-  dim3 tally_threadsPerBlock(next_p2(spacer_sizes[1] - spacer_sizes[0] + 1), 16);
-  
-  
-  thrust::device_ptr<unsigned int> second_results_start(d_second_results);
-  thrust::device_ptr<unsigned int> second_results_end(d_second_results + reference_sequence_length);
-  
-  
-  TallyResults <0, 1, 0> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_second_results);
-  //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-  
-  h_results[0] = thrust::reduce(second_results_start, second_results_end);
-  //cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
-  
-  TallyResults <0, 3, 1> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], spacer_sizes[0], spacer_sizes[1], d_second_results);
-  //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-  
-  h_results[1] = thrust::reduce(second_results_start, second_results_end);
-  //cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
-  
-  TallyResults <2, 1, 2> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_second_results);
-  //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-  
-  h_results[2] = thrust::reduce(second_results_start, second_results_end);
-  //cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
-  
-  TallyResults <2, 3, 3> <<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], spacer_sizes[0], spacer_sizes[1], d_second_results);
-  //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(int), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-  
-  h_results[3] = thrust::reduce(second_results_start, second_results_end);
-  
-  //cudaSafeCall( cudaMemcpy(h_results, d_results, 4 * sizeof(unsigned int), cudaMemcpyDeviceToHost) );
-  cudaSafeCall( cudaGetLastError() );
-  
-  cudaSafeCall( cudaEventRecord(stop, 0) );
-  cudaSafeCall( cudaEventSynchronize(stop) );
-  
-  cudaSafeCall( cudaEventElapsedTime(&elapsed, start, stop) );
-  
-  printf("%.2f ms to tally results\n", elapsed);
-  
-  cudaSafeCall( cudaEventDestroy(stop) );
-  cudaSafeCall( cudaEventDestroy(start) );
-
-  results[0][0] += h_results[0];
-  results[0][1] += h_results[1];
-  results[1][0] += h_results[2];
-  results[1][1] += h_results[3];
-  
-  printf("%d %d %d %d\n", h_results[0], h_results[1], h_results[2], h_results[3]);
-  
-  cudaSafeCall( cudaFree(d_prelim_results) );
-  cudaSafeCall( cudaFree(d_second_results) );
-  cudaSafeCall( cudaFree(d_reference_sequence) );
   cudaSafeCall( cudaFree(d_rvd_sequence) );
   cudaSafeCall( cudaFree(d_rvd_sequence2) );
-  //cudaSafeCall( cudaFree(d_results) );
   cudaSafeCall( cudaFree(d_scoring_matrix) );
   
 }
-
