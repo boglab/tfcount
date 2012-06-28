@@ -15,6 +15,8 @@
 KSEQ_INIT(gzFile, gzread)
 
 #define MAX_THREADS_PER_BLOCK 1024
+#define SCORE_THREADS_PER_BLOCK 448
+#define TALLY_THREADS_PER_BLOCK 768
 #define MAX_BLOCKS_PER_GRID 65535
 
 #define cudaSafeCall(call){   \
@@ -32,7 +34,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
    
   //__shared__ unsigned int rvd_cache[32];
       
-  int block_seq_index = MAX_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
+  int block_seq_index = SCORE_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
   int thread_id = (blockDim.x * threadIdx.y) + threadIdx.x;
   int seq_index = block_seq_index + thread_id;
   
@@ -48,7 +50,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
     for (int i = 0; i < rs_len; i++) {
       
       int rvd_index = i;
-      
+
       int sm_col = 4;
       
       char base = input_sequence[seq_index + i];
@@ -77,7 +79,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
     for (int i = 0; i < rs_len; i++) {
       
       int rvd_index = rs_len - i - 1;
-      
+
       int sm_col = 4;
       
       char base = input_sequence[seq_index + i];
@@ -105,7 +107,7 @@ __global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_leng
     
   short thread_result = 0;
   
-  int block_seq_index = MAX_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
+  int block_seq_index = TALLY_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
   int seq_index = block_seq_index + (blockDim.x * threadIdx.y) + threadIdx.x;
   
   if (seq_index < 0 || seq_index >= pr_length) return;
@@ -185,7 +187,8 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(double) * 5, cudaMemcpyHostToDevice) );
   }
   
-  dim3 threadsPerBlock(32, 32);
+  dim3 score_threadsPerBlock(32, 14);
+  dim3 tally_threadsPerBlock(32, 24);
   
   gzFile seqfile = gzopen(seq_filename, "r");
 
@@ -221,19 +224,23 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     thrust::device_ptr<unsigned char> second_results_start(d_second_results);
     thrust::device_ptr<unsigned char> second_results_end(d_second_results + reference_sequence_length);
 
-    int blocks_needed = reference_sequence_length / 1024;
-    int block_y = (blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
-    dim3 blocksPerGrid(MAX_BLOCKS_PER_GRID, block_y);
+    int score_blocks_needed = (reference_sequence_length + SCORE_THREADS_PER_BLOCK - 1) / SCORE_THREADS_PER_BLOCK;
+    int score_block_y = (score_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
+    dim3 score_blocksPerGrid(MAX_BLOCKS_PER_GRID, score_block_y);
+
+    int tally_blocks_needed = (reference_sequence_length + TALLY_THREADS_PER_BLOCK - 1) / TALLY_THREADS_PER_BLOCK;
+    int tally_block_y = (tally_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
+    dim3 tally_blocksPerGrid(MAX_BLOCKS_PER_GRID, tally_block_y);
     
     cudaSafeCall( cudaEventCreate(&start) );
     cudaSafeCall( cudaEventCreate(&stop) );
     
     cudaSafeCall( cudaEventRecord(start, 0) );
     
-    ScoreBindingSites <<<blocksPerGrid, threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence, rvd_sequence_lengths[0], cutoffs[0], 0, d_scoring_matrix, sm_pitch, d_prelim_results);
+    ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence, rvd_sequence_lengths[0], cutoffs[0], 0, d_scoring_matrix, sm_pitch, d_prelim_results);
     cudaSafeCall( cudaGetLastError() );
 
-    ScoreBindingSites <<<blocksPerGrid, threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence2, rvd_sequence_lengths[1], cutoffs[1], 1, d_scoring_matrix, sm_pitch, d_prelim_results);
+    ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_sequence2, rvd_sequence_lengths[1], cutoffs[1], 1, d_scoring_matrix, sm_pitch, d_prelim_results);
     cudaSafeCall( cudaGetLastError() );
     
     cudaSafeCall( cudaEventRecord(stop, 0) );
@@ -250,25 +257,25 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     
     cudaSafeCall( cudaEventRecord(start, 0) );
     
-    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], 0, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
+    TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], 0, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
     cudaSafeCall( cudaGetLastError() );
     
     h_results[0] = thrust::reduce(second_results_start, second_results_end);
     cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
     
-    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], 0, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
+    TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[0], 0, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
     cudaSafeCall( cudaGetLastError() );
     
     h_results[1] = thrust::reduce(second_results_start, second_results_end);
     cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
     
-    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], 2, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
+    TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], 2, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
     cudaSafeCall( cudaGetLastError() );
     
     h_results[2] = thrust::reduce(second_results_start, second_results_end);
     cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
     
-    TallyResults<<<blocksPerGrid, threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], 2, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
+    TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_sequence_lengths[1], 2, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
     cudaSafeCall( cudaGetLastError() );
     
     h_results[3] = thrust::reduce(second_results_start, second_results_end);
