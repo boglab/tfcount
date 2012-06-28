@@ -111,13 +111,14 @@ __global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_leng
   int seq_index = block_seq_index + (blockDim.x * threadIdx.y) + threadIdx.x;
   
   if (seq_index < 0 || seq_index >= pr_length) return;
+  if (!(prelim_results[seq_index] & (1UL << u_shift))) return;
   
   for (int i = spacer_range_start; i <= spacer_range_end; i++) {
     
     if (seq_index + rs_len + i >= pr_length) continue;
     
-    thread_result += ((prelim_results[seq_index] & (1UL << u_shift)) && 
-                      (prelim_results[seq_index + rs_len + i] & (1UL << d_shift)));
+    thread_result += ((prelim_results[seq_index + rs_len + i] & (1UL << d_shift)) > 0);
+
   }
   
   second_results[seq_index] = thread_result;
@@ -201,7 +202,7 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     unsigned char *d_second_results;
     char *d_reference_sequence;
     unsigned int h_results[4];
-    
+
     char *reference_sequence = seq->seq.s;
     
     for (int i = seq->seq.l; i < seq->seq.m; i++) {
@@ -225,12 +226,19 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     thrust::device_ptr<unsigned char> second_results_end(d_second_results + reference_sequence_length);
 
     int score_blocks_needed = (reference_sequence_length + SCORE_THREADS_PER_BLOCK - 1) / SCORE_THREADS_PER_BLOCK;
+
+    int score_block_x = (score_blocks_needed >= MAX_BLOCKS_PER_GRID ? MAX_BLOCKS_PER_GRID : score_blocks_needed);
     int score_block_y = (score_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
-    dim3 score_blocksPerGrid(MAX_BLOCKS_PER_GRID, score_block_y);
+
+    dim3 score_blocksPerGrid(score_block_x, score_block_y);
 
     int tally_blocks_needed = (reference_sequence_length + TALLY_THREADS_PER_BLOCK - 1) / TALLY_THREADS_PER_BLOCK;
+
+    int tally_block_x = (tally_blocks_needed >= MAX_BLOCKS_PER_GRID ? MAX_BLOCKS_PER_GRID : tally_blocks_needed);
     int tally_block_y = (tally_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
-    dim3 tally_blocksPerGrid(MAX_BLOCKS_PER_GRID, tally_block_y);
+
+
+    dim3 tally_blocksPerGrid(tally_block_x, tally_block_y);
     
     cudaSafeCall( cudaEventCreate(&start) );
     cudaSafeCall( cudaEventCreate(&stop) );
