@@ -1,5 +1,5 @@
-#ifndef OTFS_PAIRED_CUDA
-#define OTFS_PAIRED_CUDA
+#ifndef BTFCOUNT_TFCOUNT_CUDA
+#define BTFCOUNT_TFCOUNT_CUDA
 
 #ifdef __cplusplus
 extern "C" {

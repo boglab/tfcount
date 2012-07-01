@@ -7,7 +7,8 @@
 #include <stdlib.h>
 #include <thrust/reduce.h>
 #include <thrust/device_ptr.h>
-#include "paired_cuda.h"
+
+#include "tfcount_cuda.h"
 
 // Sequence handling
 #include <zlib.h>
