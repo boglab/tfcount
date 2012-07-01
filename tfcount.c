@@ -1,5 +1,6 @@
 #include <bcutils/Hashmap.h>
 #include <bcutils/Array.h>
+#include <bcutils/bcutils.h>
 
 #include "tfcount_cuda.h"
 
@@ -124,5 +125,7 @@ int run_counting_task(Hashmap *kwargs) {
   if (diresidue_scores) {
     hashmap_delete(diresidue_scores, free);
   }
+  
+  return 0;
 
 }
