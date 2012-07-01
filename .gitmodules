@@ -1,0 +1,3 @@
+[submodule "bcutils"]
+	path = bcutils
+	url = git@github.com:njbooher/boglab_cutils.git
