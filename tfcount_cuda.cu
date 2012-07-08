@@ -58,7 +58,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
       
       char base = input_sequence[seq_index + i];
       
-      if (base == 'A' || base == 'a')    
+      if (base == 'A' || base == 'a')
         sm_col = 0;
       if (base == 'C' || base == 'c')
         sm_col = 1;
@@ -87,7 +87,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
       
       char base = input_sequence[seq_index + i];
       
-      if (base == 'A' || base == 'a')    
+      if (base == 'A' || base == 'a')
         sm_col = 3;
       if (base == 'C' || base == 'c')
         sm_col = 2;
@@ -206,14 +206,13 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     char *d_reference_sequence;
 
     char *reference_sequence = seq->seq.s;
+    unsigned int reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
     
-    for (int i = seq->seq.l; i < seq->seq.m; i++) {
+    for (int i = seq->seq.l; i < reference_sequence_length - 1; i++) {
       reference_sequence[i] = 'X';
     }
     
-    reference_sequence[seq->seq.m - 1] = '\0';
-    
-    unsigned int reference_sequence_length = seq->seq.m;
+    reference_sequence[reference_sequence_length- 1] = '\0';
     
     cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_sequence_length * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
