@@ -32,76 +32,57 @@ KSEQ_INIT(gzFile, gzread)
 __device__ double ScoringMatrixVal(double *scoring_matrix, size_t pitch, unsigned int row, unsigned int column);
 double *ScoringMatrixRow(double *scoring_matrix, size_t pitch, unsigned int row);
 
-//template< unsigned int STRAND, unsigned int RVD_NUM >
 __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length, unsigned int *rvd_sequence, unsigned int rs_len, double cutoff, unsigned int rvd_num, double *scoring_matrix, size_t sm_pitch, unsigned char *results) {
-   
-  //__shared__ unsigned int rvd_cache[32];
-      
+
   int block_seq_index = SCORE_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
   int thread_id = (blockDim.x * threadIdx.y) + threadIdx.x;
   int seq_index = block_seq_index + thread_id;
   
   if (seq_index < 1 || seq_index >= is_length || seq_index + rs_len >= is_length - 1) return;
-  
-//  if (threadIdx.y == 0) 
-//    rvd_cache[thread_id] = rvd_sequence[thread_id];
-  
-  if (input_sequence[seq_index - 1] == 'T' || input_sequence[seq_index - 1] == 't') {
-    
-    double thread_result = 0;
-    
-    for (int i = 0; i < rs_len; i++) {
-      
-      int rvd_index = i;
 
-      int sm_col = 4;
-      
-      char base = input_sequence[seq_index + i];
-      
-      if (base == 'A' || base == 'a')
-        sm_col = 0;
-      if (base == 'C' || base == 'c')
-        sm_col = 1;
-      if (base == 'G' || base == 'g')
-        sm_col = 2;
-      if (base == 'T' || base == 't')
-        sm_col = 3;
-      
-      thread_result += ScoringMatrixVal(scoring_matrix, sm_pitch, rvd_sequence[rvd_index], sm_col);
-      
-    }
-    
-    results[seq_index] |= (thread_result < cutoff ? 1UL : 0UL) << (2 * rvd_num);
-    
-  } 
-  
-  if (input_sequence[seq_index + rs_len] == 'A' || input_sequence[seq_index + rs_len] == 'a') {
-    
-    double thread_result = 0;
-    
-    for (int i = 0; i < rs_len; i++) {
-      
-      int rvd_index = rs_len - i - 1;
+  char first = input_sequence[seq_index - 1];
+  char last  = input_sequence[seq_index + rs_len];
 
-      int sm_col = 4;
-      
+  bool first_t = first == 'T' || first == 't';
+  bool last_a  = last == 'A' || last == 'a';
+  
+  if (first_t || last_a) {
+
+    double thread_result_t = 0;
+    double thread_result_a = 0;
+
+    for (int i = 0; i < rs_len; i++) {
+
+      int sm_col_t = 4;
+
       char base = input_sequence[seq_index + i];
-      
+
       if (base == 'A' || base == 'a')
-        sm_col = 3;
+        sm_col_t = 0;
       if (base == 'C' || base == 'c')
-        sm_col = 2;
+        sm_col_t = 1;
       if (base == 'G' || base == 'g')
-        sm_col = 1;
+        sm_col_t = 2;
       if (base == 'T' || base == 't')
-        sm_col = 0;
-      
-      thread_result += ScoringMatrixVal(scoring_matrix, sm_pitch, rvd_sequence[rvd_index], sm_col);
-      
+        sm_col_t = 3;
+
+      int rvd_index_t = i;
+      int rvd_index_a = rs_len - i - 1;
+
+      thread_result_t += ScoringMatrixVal(scoring_matrix, sm_pitch, rvd_sequence[rvd_index_t], sm_col_t);
+
+      int sm_col_a = (sm_col_t == 4 ? 4 : 3 - sm_col_t);
+
+      thread_result_a += ScoringMatrixVal(scoring_matrix, sm_pitch, rvd_sequence[rvd_index_a], sm_col_a);
+
     }
-    
-    results[seq_index] |= (thread_result < cutoff ? 1UL : 0UL) << (2 * rvd_num + 1);
-    
+
+    if (first_t)
+      results[seq_index] |= (thread_result_t < cutoff ? 1UL : 0UL) << (2 * rvd_num);
+
+    if (last_a)
+      results[seq_index] |= (thread_result_a < cutoff ? 1UL : 0UL) << (2 * rvd_num + 1);
+
   }
   
 }
@@ -173,7 +154,7 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
   //unsigned int *d_rvd_sequence2;
   double *d_scoring_matrix;
   size_t sm_pitch;
-  cudaEvent_t start, stop;
+//  cudaEvent_t start, stop;
 //  float elapsed;
   
   //cudaSafeCall( cudaFuncSetCacheConfig(ScoreBindingSites, cudaFuncCachePreferL1) );
@@ -206,9 +187,9 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     char *d_reference_sequence;
 
     char *reference_sequence = seq->seq.s;
-    unsigned int reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
+    unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
     
-    for (int i = seq->seq.l; i < reference_sequence_length - 1; i++) {
+    for (unsigned long i = seq->seq.l; i < reference_sequence_length - 1; i++) {
       reference_sequence[i] = 'X';
     }
     
@@ -237,10 +218,10 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
 
     dim3 tally_blocksPerGrid(tally_block_x, tally_block_y);
     
-    cudaSafeCall( cudaEventCreate(&start) );
-    cudaSafeCall( cudaEventCreate(&stop) );
-    
-    cudaSafeCall( cudaEventRecord(start, 0) );
+//    cudaSafeCall( cudaEventCreate(&start) );
+//    cudaSafeCall( cudaEventCreate(&stop) );
+
+//    cudaSafeCall( cudaEventRecord(start, 0) );
     
     for (int i = 0; i < num_rvd_pairs; i++) {
       
