@@ -43,7 +43,7 @@ int run_counting_task(Hashmap *kwargs) {
 
   // Convert hashmap to int map
   
-  hashmap_add(diresidue_scores, "XX", double_array(0, 0, 0, 0, 0));
+  hashmap_add(diresidue_scores, "XX", double_array(0, 0, 0, 0, BIGGEST_RVD_SCORE_EVER));
 
   double **scoring_matrix = calloc(64, sizeof(double*));
 
