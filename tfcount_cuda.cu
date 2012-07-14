@@ -34,7 +34,7 @@ __constant__ unsigned int c_rvd_pairs[4096];
 __device__ double ScoringMatrixVal(double *scoring_matrix, size_t pitch, unsigned int row, unsigned int column);
 double *ScoringMatrixRow(double *scoring_matrix, size_t pitch, unsigned int row);
 
-__global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length, unsigned int rvd_offset, unsigned int rs_len, double cutoff, unsigned int rvd_num, double *scoring_matrix, size_t sm_pitch, unsigned char *results) {
+__global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length, unsigned int rvd_offset, unsigned int rs_len, double cutoff, int c_upstream, unsigned int rvd_num, double *scoring_matrix, size_t sm_pitch, unsigned char *results) {
 
   int block_seq_index = SCORE_THREADS_PER_BLOCK * (blockIdx.y * gridDim.x + blockIdx.x);
   int thread_id = (blockDim.x * threadIdx.y) + threadIdx.x;
@@ -45,10 +45,13 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
   char first = input_sequence[seq_index - 1];
   char last  = input_sequence[seq_index + rs_len];
 
-  bool first_t = first == 'T' || first == 't';
-  bool last_a  = last == 'A' || last == 'a';
+  int first_t = c_upstream != 1 && (first == 'T' || first == 't');
+  int first_c = c_upstream != 0 && (first == 'C' || first == 'c');
+  int last_a  = c_upstream != 1 && (last == 'A' || last == 'a');
+  int last_g  = c_upstream != 0 && (last == 'G' || last == 'g');
   
-  if (first_t || last_a) {
+
+  if (first_c || first_t || last_g || last_a) {
 
     double thread_result_t = 0;
     double thread_result_a = 0;
@@ -79,17 +82,17 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
 
     }
 
-    if (first_t)
-      results[seq_index] |= (thread_result_t < cutoff ? 1UL : 0UL) << (2 * rvd_num);
+    if (first_c || first_t)
+      results[seq_index] |= (thread_result_t < cutoff ? 1UL : 0UL) << ((2 * rvd_num) + (first_c * 4));
 
-    if (last_a)
-      results[seq_index] |= (thread_result_a < cutoff ? 1UL : 0UL) << (2 * rvd_num + 1);
+    if (last_g || last_a)
+      results[seq_index] |= (thread_result_a < cutoff ? 1UL : 0UL) << ((2 * rvd_num + 1) + (last_g * 4));
 
   }
   
 }
 
-__global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_length, unsigned int rs_len, unsigned int u_shift, unsigned int d_shift, unsigned int spacer_range_start, unsigned int spacer_range_end, unsigned int *second_results) {
+__global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_length, unsigned int rs_len, int c_upstream, unsigned int u_shift, unsigned int d_shift, unsigned int spacer_range_start, unsigned int spacer_range_end, unsigned int *second_results) {
     
   short thread_result = 0;
   
@@ -97,13 +100,17 @@ __global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_leng
   int seq_index = block_seq_index + (blockDim.x * threadIdx.y) + threadIdx.x;
   
   if (seq_index < 0 || seq_index >= pr_length) return;
-  if (!(prelim_results[seq_index] & (1UL << u_shift))) return;
+
+  int first_t = (prelim_results[seq_index] & (1UL << u_shift)) > 0;
+  int first_c = (prelim_results[seq_index] & (1UL << (u_shift + 4))) > 0;
+
+  if (!((c_upstream != 0 && first_c) || (c_upstream != 1 && first_t))) return;
   
   for (int i = spacer_range_start; i <= spacer_range_end; i++) {
     
     if (seq_index + rs_len + i >= pr_length) continue;
     
-    thread_result += ((prelim_results[seq_index + rs_len + i] & (1UL << d_shift)) > 0);
+    thread_result += ((prelim_results[seq_index + rs_len + i] & (1UL << (d_shift + (first_c * 4))) ) > 0);
 
   }
   
@@ -121,7 +128,7 @@ double *ScoringMatrixRow(double *scoring_matrix, size_t pitch, unsigned int row)
   return (double*)((char*) scoring_matrix + row * pitch);
 }
 
-void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
+void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
   
   double *d_scoring_matrix;
   size_t sm_pitch; 
@@ -192,31 +199,31 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
       int first_index = 2 * i;
       int second_index = first_index + 1;
 
-      ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, first_index * PADDED_RVD_WIDTH, rvd_lengths[first_index], cutoffs[first_index], 0, d_scoring_matrix, sm_pitch, d_prelim_results);
+      ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, first_index * PADDED_RVD_WIDTH, rvd_lengths[first_index], cutoffs[first_index], c_upstream, 0, d_scoring_matrix, sm_pitch, d_prelim_results);
       cudaSafeCall( cudaGetLastError() );
 
-      ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, second_index * PADDED_RVD_WIDTH, rvd_lengths[second_index], cutoffs[second_index], 1, d_scoring_matrix, sm_pitch, d_prelim_results);
+      ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, second_index * PADDED_RVD_WIDTH, rvd_lengths[second_index], cutoffs[second_index], c_upstream, 1, d_scoring_matrix, sm_pitch, d_prelim_results);
       cudaSafeCall( cudaGetLastError() );
 
-      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[first_index], 0, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
+      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[first_index], c_upstream, 0, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
       cudaSafeCall( cudaGetLastError() );
       
       pair_temp_results[0] = thrust::reduce(second_results_start, second_results_end);
       cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
       
-      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[first_index], 0, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
+      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[first_index], c_upstream, 0, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
       cudaSafeCall( cudaGetLastError() );
       
       pair_temp_results[1] = thrust::reduce(second_results_start, second_results_end);
       cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
       
-      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[second_index], 2, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
+      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[second_index], c_upstream, 2, 1, spacer_sizes[0], spacer_sizes[1], d_second_results);
       cudaSafeCall( cudaGetLastError() );
       
       pair_temp_results[2] = thrust::reduce(second_results_start, second_results_end);
       cudaSafeCall( cudaMemset(d_second_results, '\0', reference_sequence_length * sizeof(unsigned int)) );
       
-      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[second_index], 2, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
+      TallyResults<<<tally_blocksPerGrid, tally_threadsPerBlock>>>(d_prelim_results, reference_sequence_length, rvd_lengths[second_index], c_upstream, 2, 3, spacer_sizes[0], spacer_sizes[1], d_second_results);
       cudaSafeCall( cudaGetLastError() );
       
       pair_temp_results[3] = thrust::reduce(second_results_start, second_results_end);
