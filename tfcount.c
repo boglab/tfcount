@@ -2,6 +2,8 @@
 #include <bcutils/Array.h>
 #include <bcutils/bcutils.h>
 
+#include <stdio.h>
+
 #include "tfcount_cuda.h"
 
 #define BIGGEST_RVD_SCORE_EVER 100
@@ -23,6 +25,14 @@ int run_counting_task(Hashmap *kwargs) {
   unsigned int spacer_max = *((unsigned int *) hashmap_get(kwargs, "spacer_max"));
 
   int c_upstream = *((int *) hashmap_get(kwargs, "c_upstream"));
+
+  char *log_filepath = hashmap_get(kwargs, "log_filepath");
+
+  FILE *log_file = stdout;
+
+  if(log_filepath && strcmp(log_filepath, "NA") != 0) {
+    log_file = fopen(log_filepath, "a");
+  }
   
   Array *empty_array = array_new();
 
@@ -102,7 +112,11 @@ int run_counting_task(Hashmap *kwargs) {
   
   // Transform RVD sequences to int sequences
 
-  RunCountBindingSites(seq_filename, spacer_sizes, rvd_pairs, rvd_lens, rvd_cutoffs, num_rvd_pairs, c_upstream, scoring_matrix, hashmap_size(diresidue_scores), count_results_array);
+  RunCountBindingSites(seq_filename, log_file, spacer_sizes, rvd_pairs, rvd_lens, rvd_cutoffs, num_rvd_pairs, c_upstream, scoring_matrix, hashmap_size(diresidue_scores), count_results_array);
+
+  if(log_file != stdout) {
+    fclose(log_file);
+  }
 
   free(scoring_matrix);
   hashmap_delete(rvd_to_int, NULL);

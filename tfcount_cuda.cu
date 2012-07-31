@@ -8,6 +8,10 @@
 #include <thrust/reduce.h>
 #include <thrust/device_ptr.h>
 
+extern "C" {
+#include <bcutils/bcutils.h>
+}
+
 #include "tfcount_cuda.h"
 
 // Sequence handling
@@ -126,7 +130,7 @@ double *ScoringMatrixRow(double *scoring_matrix, size_t pitch, unsigned int row)
   return (double*)((char*) scoring_matrix + row * pitch);
 }
 
-void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
+void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
   
   unsigned int *d_rvd_pairs;
   double *d_scoring_matrix;
@@ -163,6 +167,8 @@ void RunCountBindingSites(char *seq_filename, unsigned int *spacer_sizes, unsign
     }
     
     reference_sequence[reference_sequence_length- 1] = '\0';
+
+    logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
 
     cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_sequence_length * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );

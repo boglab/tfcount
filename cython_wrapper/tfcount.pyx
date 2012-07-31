@@ -14,7 +14,7 @@ cdef extern from "Hashmap.h":
 cdef extern from "tfcount.h":
         int run_counting_task(Hashmap *kwargs)
 
-def TargetFinderCountTask(char *seq_filename, int c_upstream, double cutoff, unsigned int spacer_min, unsigned int spacer_max, rvd_pairs):
+def TargetFinderCountTask(char *seq_filename, char *log_filepath, int c_upstream, double cutoff, unsigned int spacer_min, unsigned int spacer_max, rvd_pairs):
 
         cdef int i
         cdef int j
@@ -34,6 +34,7 @@ def TargetFinderCountTask(char *seq_filename, int c_upstream, double cutoff, uns
         cdef unsigned int *count_results_array = <unsigned int *> calloc(4 * num_pairs, sizeof(unsigned int))
         
         hashmap_add(tfcount_kwargs, "seq_filename", seq_filename)
+        hashmap_add(tfcount_kwargs, "log_filepath", log_filepath)
         hashmap_add(tfcount_kwargs, "rvd_strings", rvd_strings)
         hashmap_add(tfcount_kwargs, "weight", &weight)
         hashmap_add(tfcount_kwargs, "cutoff", &cutoff)
