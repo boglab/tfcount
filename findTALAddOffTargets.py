@@ -5,7 +5,7 @@ from optparse import OptionParser
 from btfcount import TargetFinderCountTask
 
 class TaskError(ValueError):
-	pass
+    pass
 
 def create_logger(logFilepath):
     
