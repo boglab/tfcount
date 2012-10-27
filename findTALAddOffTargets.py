@@ -7,12 +7,12 @@ from btfcount import TargetFinderCountTask
 class TaskError(ValueError):
     pass
 
-def create_logger(logFilepath):
+def createLogger(log_filepath):
     
-    if logFilepath != 'NA':
+    if log_filepath != 'NA':
         def logger(message):
-            with open(logFilepath, "a") as logFile:
-                logFile.write("[%s] %s\n" % (datetime.now().ctime(), message))
+            with open(log_filepath, "a") as log_file:
+                log_file.write("[%s] %s\n" % (datetime.now().ctime(), message))
         
     else:
         def logger(message):
@@ -22,7 +22,7 @@ def create_logger(logFilepath):
 
 def validateOptions(options):
     
-    if options.cupstream not in [0, 1, 2]:
+    if options.c_upstream not in [0, 1, 2]:
         raise TaskError("Invalid cupstream value provided")
     
     if options.min < 10 or options.min > 35:
@@ -37,15 +37,15 @@ def validateOptions(options):
     if options.cutoff not in [3, 3.5, 4]:
         raise TaskError("Invalid cutoff value provided")
 
-def FindTALAddOffTargets(options):
+def findTALAddOffTargets(options):
     
-    logger = create_logger(options.logFilepath)
+    logger = createLogger(options.log_filepath)
     
     logger("Beginning")
     
     results = []
     
-    with open(options.outpath, "r") as results_file:
+    with open(options.out_path, "r") as results_file:
         
         results_line = results_file.readline()
         
@@ -73,7 +73,7 @@ def FindTALAddOffTargets(options):
         
         talen_pairs.append([row_fields[8], row_fields[9]])
     
-    off_target_counts = TargetFinderCountTask(options.offtargetseq, options.logFilepath, options.cupstream, options.cutoff, options.min, options.max, talen_pairs)
+    off_target_counts = TargetFinderCountTask(options.off_target_seq, options.log_filepath, options.c_upstream, options.cutoff, options.min, options.max, talen_pairs)
 
     j = 0
     
@@ -92,7 +92,7 @@ def FindTALAddOffTargets(options):
         
         j = j + 1
     
-    with open(options.outpath, "w") as out:
+    with open(options.out_path, "w") as out:
         
         for results_line in results:
             out.write(results_line + '\n')
@@ -107,15 +107,14 @@ if __name__ == '__main__':
     # Offtarget Options
     parser.add_option('-m', '--min', dest='min', type='int', default=15, help='the minimum spacer size to try; default is 15')
     parser.add_option('-x', '--max', dest='max', type='int', default=30, help='the maximum spacer size to try; default is 30')
-    parser.add_option('-u', '--cupstream', dest='cupstream', type='int', default = 0, help='0 to look for T upstream, 1 to look for C, 2 to look for either; default is 0')
+    parser.add_option('-u', '--cupstream', dest='c_upstream', type='int', default = 0, help='0 to look for T upstream, 1 to look for C, 2 to look for either; default is 0')
     parser.add_option('-t', '--cutoff', dest='cutoff', type='float', default = 3.0, help='The threshold score that off-targets must meet; default is 3.0')
-    parser.add_option('-l', '--logpath', dest='logFilepath', type='string', default = 'NA', help='Optional file path to log progress to; default is stdout')
-    parser.add_option('-s', '--offtargetseq', dest='offtargetseq', type = 'string', default='NA', help='Path to FASTA file to count off-targets in')
-    parser.add_option('-p', '--outpath', dest='outpath', type='string', default = 'NA', help='TALEN Targeter result file path')
+    parser.add_option('-l', '--logpath', dest='log_filepath', type='string', default = 'NA', help='Optional file path to log progress to; default is stdout')
+    parser.add_option('-s', '--offtargetseq', dest='off_target_seq', type = 'string', default='NA', help='Path to FASTA file to count off-targets in')
+    parser.add_option('-p', '--outpath', dest='out_path', type='string', default = 'NA', help='TALEN Targeter result file path')
 
     (options, args) = parser.parse_args()
     
     validateOptions(options)
     
-    FindTALAddOffTargets(options)
-	
+    findTALAddOffTargets(options)
