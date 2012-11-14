@@ -1,7 +1,6 @@
 # License
 
-With the exception of the Kseq library (self-contained in the `kseq.h' file),
-all source code is available under an ISC license.
+All source code is available under an ISC license.
 
 Copyright (c) 2012, Nick Booher <njbooher@gmail.com>.
 

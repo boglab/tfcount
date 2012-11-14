@@ -16,7 +16,7 @@ extern "C" {
 
 // Sequence handling
 #include <zlib.h>
-#include "kseq.h"
+#include <bcutils/kseq.h>
 KSEQ_INIT(gzFile, gzread)
 
 #define MAX_THREADS_PER_BLOCK 1024
