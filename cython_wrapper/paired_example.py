@@ -1,4 +1,4 @@
-from btfcount import TargetFinderCountTask
+from btfcount import PairedTargetFinderCountTask
 
 #organism = "caenorhabditis_elegans"
 organism = "arabidopsis_thaliana"
@@ -80,4 +80,4 @@ example_rvd_pairs = [
     #["HD NN NN NI NN NN HD NN NN NI NI HD HD NI NI NI NG NG HD", "HD NN NG NI NN NN NG NG NG NG HD NG NN NI NI NI NG HD NG"],
     
 ]
-print(TargetFinderCountTask("/home/nick/workspace/boglab/genome_data/" + organism + ".fasta", 0, 3.0, 15, 30, example_rvd_pairs))
+print(PairedTargetFinderCountTask("/opt/boglab/genome_data/" + organism + ".fasta", "NA", 0, 3.0, 15, 30, example_rvd_pairs))

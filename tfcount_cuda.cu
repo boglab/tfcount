@@ -130,7 +130,7 @@ double *ScoringMatrixRow(double *scoring_matrix, size_t pitch, unsigned int row)
   return (double*)((char*) scoring_matrix + row * pitch);
 }
 
-void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
+void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
   
   unsigned int *d_rvd_pairs;
   double *d_scoring_matrix;

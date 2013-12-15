@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from optparse import OptionParser
-from btfcount import TargetFinderCountTask
+from btfcount import PairedTargetFinderCountTask
 
 class TaskError(ValueError):
     pass
