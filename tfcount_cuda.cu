@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <thrust/count.h>
 #include <thrust/reduce.h>
 #include <thrust/device_ptr.h>
 
@@ -128,6 +129,99 @@ __device__ double ScoringMatrixVal(double *scoring_matrix, size_t pitch, unsigne
 
 double *ScoringMatrixRow(double *scoring_matrix, size_t pitch, unsigned int row) {
   return (double*)((char*) scoring_matrix + row * pitch);
+}
+
+struct first_a_or_c
+{
+  __host__ __device__ bool operator()(const unsigned char &x) {
+      return (x & 1) || (x & (1 << 4));
+  }
+};
+
+struct last_a_or_g
+{
+  __host__ __device__ bool operator()(const unsigned char &x) {
+      return (x & (1 << 1)) || (x & (1 << 5));
+  }
+};
+
+void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_seqs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_seqs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
+  
+  unsigned int *d_rvd_seqs;
+  double *d_scoring_matrix;
+  size_t sm_pitch;
+  
+  cudaSafeCall( cudaMalloc(&d_rvd_seqs, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int)));
+  cudaSafeCall( cudaMemcpy(d_rvd_seqs, rvd_seqs, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int), cudaMemcpyHostToDevice) );
+  
+  cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(double), scoring_matrix_length * sizeof(double)) );
+  
+  for (unsigned int i = 0; i < scoring_matrix_length; i++) {
+    cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(double) * 5, cudaMemcpyHostToDevice) );
+  }
+  
+  dim3 score_threadsPerBlock(32, 14);
+  
+  gzFile seqfile = gzopen(seq_filename, "r");
+
+  kseq_t *seq = kseq_init(seqfile);
+  int result;
+
+  while ((result = kseq_read(seq)) >= 0) {
+
+    unsigned char *d_prelim_results;
+    char *d_reference_sequence;
+
+    char *reference_sequence = seq->seq.s;
+    unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
+    
+    for (unsigned long i = seq->seq.l; i < reference_sequence_length - 1; i++) {
+      reference_sequence[i] = 'X';
+    }
+    
+    reference_sequence[reference_sequence_length- 1] = '\0';
+
+    logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
+
+    cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_sequence_length * sizeof(char)) );
+    cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
+
+    cudaSafeCall( cudaMalloc(&d_prelim_results, reference_sequence_length * sizeof(unsigned char)) );
+    
+    thrust::device_ptr<unsigned char> prelim_results_start(d_prelim_results);
+    thrust::device_ptr<unsigned char> prelim_results_end(d_prelim_results + reference_sequence_length);
+
+    int score_blocks_needed = (reference_sequence_length + SCORE_THREADS_PER_BLOCK - 1) / SCORE_THREADS_PER_BLOCK;
+
+    int score_block_x = (score_blocks_needed >= MAX_BLOCKS_PER_GRID ? MAX_BLOCKS_PER_GRID : score_blocks_needed);
+    int score_block_y = (score_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
+
+    dim3 score_blocksPerGrid(score_block_x, score_block_y);
+    
+    for (int i = 0; i < num_rvd_seqs; i++) {
+      
+      cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
+      
+      ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_seqs + i * PADDED_RVD_WIDTH, rvd_lengths[i], cutoffs[i], c_upstream, 0, d_scoring_matrix, sm_pitch, d_prelim_results);
+      cudaSafeCall( cudaGetLastError() );
+      
+      results[i] += thrust::count_if(prelim_results_start, prelim_results_end, first_a_or_c());
+      results[i] += thrust::count_if(prelim_results_start, prelim_results_end, last_a_or_g());
+
+      
+    }
+
+    cudaSafeCall( cudaFree(d_prelim_results) );
+    cudaSafeCall( cudaFree(d_reference_sequence) );
+    
+  }
+
+  kseq_destroy(seq);
+  gzclose(seqfile);
+  
+  cudaSafeCall( cudaFree(d_rvd_seqs) );
+  cudaSafeCall( cudaFree(d_scoring_matrix) );
+  
 }
 
 void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
