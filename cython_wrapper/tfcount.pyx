@@ -69,11 +69,10 @@ def TargetFinderCountTask(char *seq_filename, char *log_filepath, int c_upstream
                 
                 unsigned int *count_results_array = <unsigned int *> calloc(num_seqs, sizeof(unsigned int))
                 
-                double **scoring_matrix = <double**> calloc(64, sizeof(double*))
-                
                 Array *empty_array = array_new()
                 Hashmap *diresidue_probabilities = get_diresidue_probabilities(empty_array, weight)
                 Hashmap *diresidue_scores = convert_probabilities_to_scores(diresidue_probabilities)
+                double **scoring_matrix = <double**> calloc(hashmap_size(diresidue_scores), sizeof(double*))
         
         hashmap_delete(diresidue_probabilities, NULL)
         hashmap_add(diresidue_scores, "XX", double_array(0, 0, 0, 0, BIGGEST_RVD_SCORE_EVER))
@@ -148,11 +147,10 @@ def PairedTargetFinderCountTask(char *seq_filename, char *log_filepath, int c_up
                 unsigned int *spacer_sizes = [spacer_min, spacer_max]
                 unsigned int *count_results_array = <unsigned int *> calloc(4 * num_pairs, sizeof(unsigned int))
                 
-                double **scoring_matrix = <double**> calloc(64, sizeof(double*))
-                
                 Array *empty_array = array_new()
                 Hashmap *diresidue_probabilities = get_diresidue_probabilities(empty_array, weight)
                 Hashmap *diresidue_scores = convert_probabilities_to_scores(diresidue_probabilities)
+                double **scoring_matrix = <double**> calloc(hashmap_size(diresidue_scores), sizeof(double*))
         
         hashmap_delete(diresidue_probabilities, NULL)
         hashmap_add(diresidue_scores, "XX", double_array(0, 0, 0, 0, BIGGEST_RVD_SCORE_EVER))
