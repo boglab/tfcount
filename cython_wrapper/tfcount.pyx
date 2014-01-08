@@ -160,8 +160,6 @@ def PairedTargetFinderCountTask(char *seq_filename, char *log_filepath, int c_up
         cdef:
                 double **scoring_matrix = <double**> calloc(hashmap_size(diresidue_scores), sizeof(double*))
         
-        hashmap_delete(diresidue_probabilities, NULL)
-        hashmap_add(diresidue_scores, "XX", double_array(0, 0, 0, 0, BIGGEST_RVD_SCORE_EVER))
         cdef char **diresidues = hashmap_keys(diresidue_scores)
         
         rvd_to_int = {}
