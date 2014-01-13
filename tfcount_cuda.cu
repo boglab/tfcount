@@ -5,15 +5,23 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <thrust/count.h>
 #include <thrust/reduce.h>
+#include <thrust/sequence.h>
+#include <thrust/transform.h>
+#include <thrust/sort.h>
 #include <thrust/device_ptr.h>
+#include <thrust/functional.h>
+#include <thrust/extrema.h>
+#include <thrust/partition.h>
 
 extern "C" {
 #include <bcutils/bcutils.h>
 }
 
 #include "tfcount_cuda.h"
+
 
 // Sequence handling
 #include <zlib.h>
@@ -52,7 +60,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
   int first_c = c_upstream != 0 && (first == 'C' || first == 'c');
   int last_a  = c_upstream != 1 && (last == 'A' || last == 'a');
   int last_g  = c_upstream != 0 && (last == 'G' || last == 'g');
-  
+
 
   if (first_c || first_t || last_g || last_a) {
 
@@ -92,7 +100,7 @@ __global__ void ScoreBindingSites(char *input_sequence, unsigned long is_length,
       results[seq_index] |= (thread_result_a < cutoff ? 1UL : 0UL) << ((2 * rvd_num + 1) + (last_g * 4));
 
   }
-  
+
 }
 
 __global__ void TallyResults(unsigned char *prelim_results, unsigned int pr_length, unsigned int rs_len, int c_upstream, unsigned int u_shift, unsigned int d_shift, unsigned int spacer_range_start, unsigned int spacer_range_end, unsigned int *second_results) {
@@ -138,10 +146,34 @@ struct first_a_or_c
   }
 };
 
+
+
 struct last_a_or_g
 {
   __host__ __device__ bool operator()(const unsigned char &x) {
       return (x & (1 << 1)) || (x & (1 << 5));
+  }
+};
+
+struct index_to_keep
+{
+  const int offset;
+
+  index_to_keep(int _offset) : offset(_offset) {}
+
+  __host__ __device__ int operator()(const unsigned char &x, const int &y) {
+      if ((x & 1) || (x & (1 << 4)) || (x & (1 << 2)) || (x & (1 << 6))) {
+        return y + offset;
+      } else {
+        return -1;
+      }
+  }
+};
+
+struct valid_index
+{
+  __host__ __device__ bool operator()(const int &x) {
+       return x > -1;
   }
 };
 
@@ -347,3 +379,127 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
   cudaSafeCall( cudaFree(d_scoring_matrix) );
   
 }
+
+void RunPairedFindBindingSitesKeepScores_init(unsigned int **d_rvd_pair_p, double **d_scoring_matrix_p, size_t *sm_pitch_p, unsigned char **d_prelim_results_p, int **d_prelim_results_indexes_p, char **d_reference_sequence_p, unsigned char **prelim_results_p, int **prelim_results_indexes_p, unsigned long *reference_window_size_p, int *score_block_x_p, int *score_block_y_p, unsigned int **rvd_pair, double **scoring_matrix, unsigned int *rvd_lengths, unsigned int scoring_matrix_length) {
+  
+  unsigned int *d_rvd_pair;
+  double *d_scoring_matrix;
+  size_t sm_pitch;
+  unsigned char *d_prelim_results;
+  int *d_prelim_results_indexes;
+  unsigned char *prelim_results;
+  int *prelim_results_indexes;
+  char *d_reference_sequence;
+  // must be divisible by 32, pref power of 2
+  unsigned long reference_window_size = 134217728;// 2^27
+  int score_block_x;
+  int score_block_y;
+  
+  cudaSafeCall( cudaMalloc(&d_rvd_pair, 2 * PADDED_RVD_WIDTH * sizeof(unsigned int)));
+  cudaSafeCall( cudaMemcpy(d_rvd_pair, rvd_pair[0], rvd_lengths[0] * sizeof(unsigned int), cudaMemcpyHostToDevice) );
+  cudaSafeCall( cudaMemcpy(d_rvd_pair + PADDED_RVD_WIDTH, rvd_pair[1], rvd_lengths[1] * sizeof(unsigned int), cudaMemcpyHostToDevice) );
+  
+  cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(double), scoring_matrix_length * sizeof(double)) );
+  
+  for (unsigned int i = 0; i < scoring_matrix_length; i++) {
+    cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(double) * 5, cudaMemcpyHostToDevice) );
+  }
+  
+  cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_window_size * sizeof(char)) );
+  cudaSafeCall( cudaMalloc(&d_prelim_results, reference_window_size * sizeof(unsigned char)) );
+  cudaSafeCall( cudaMalloc(&d_prelim_results_indexes, reference_window_size * sizeof(int)) );
+  
+  cudaSafeCall( cudaMallocHost(&prelim_results, 400000000 * sizeof(unsigned char)) );
+  cudaSafeCall( cudaMallocHost(&prelim_results_indexes, 400000000 * sizeof(int)) );
+
+  int score_blocks_needed = (reference_window_size + SCORE_THREADS_PER_BLOCK - 1) / SCORE_THREADS_PER_BLOCK;
+
+  score_block_x = (score_blocks_needed >= MAX_BLOCKS_PER_GRID ? MAX_BLOCKS_PER_GRID : score_blocks_needed);
+  score_block_y = (score_blocks_needed + (MAX_BLOCKS_PER_GRID - 1)) / MAX_BLOCKS_PER_GRID;
+  
+  *d_rvd_pair_p = d_rvd_pair;
+  *d_scoring_matrix_p = d_scoring_matrix;
+  *sm_pitch_p = sm_pitch;
+  *d_prelim_results_p = d_prelim_results;
+  *d_prelim_results_indexes_p = d_prelim_results_indexes;
+  *prelim_results_p = prelim_results;
+  *prelim_results_indexes_p = prelim_results_indexes;
+  *d_reference_sequence_p = d_reference_sequence;
+  *reference_window_size_p = reference_window_size;
+  *score_block_x_p = score_block_x;
+  *score_block_y_p = score_block_y;
+  
+}
+
+int RunPairedFindBindingSitesKeepScores(char *d_reference_sequence, unsigned int *d_rvd_pairs, double *d_scoring_matrix, size_t sm_pitch, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes, unsigned long reference_window_size, int score_block_x, int score_block_y, unsigned int *rvd_lengths, char *ref_seq, unsigned long ref_seq_len, double *cutoffs, int c_upstream) {
+  
+  dim3 score_threadsPerBlock(32, 14);
+  dim3 score_blocksPerGrid(score_block_x, score_block_y);
+  
+  thrust::device_ptr<int> prelim_results_indexes_start(d_prelim_results_indexes);
+  thrust::device_ptr<int> prelim_results_indexes_end(d_prelim_results_indexes + reference_window_size);
+  thrust::device_ptr<unsigned char> prelim_results_start(d_prelim_results);
+  thrust::device_ptr<unsigned char> prelim_results_end(d_prelim_results + reference_window_size);
+
+  int keepers_end_pos = 0;
+
+  int max_rvd_len = (rvd_lengths[0] > rvd_lengths[1]) ? rvd_lengths[0] : rvd_lengths[1];
+  int usable_tile_size = reference_window_size - (((max_rvd_len - 1) + 31) / 32 ) * 32;
+
+  int iterations_needed = (ref_seq_len + (usable_tile_size - 1)) / usable_tile_size;
+  
+  memset(prelim_results, '\0', 400000000 * sizeof(unsigned char));
+  
+  for (int i = 0; i < iterations_needed; i++) {
+
+    int copy_offset = usable_tile_size * i;
+
+    int copy_num;
+
+    if (ref_seq_len - copy_offset <= reference_window_size)
+      copy_num = ref_seq_len - copy_offset;
+    else
+      copy_num = reference_window_size;
+
+    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', reference_window_size * sizeof(unsigned char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence + reference_window_size - 1, '\0', 1 * sizeof(unsigned char)) );
+    cudaSafeCall( cudaMemcpy(d_reference_sequence, ref_seq + copy_offset, copy_num * sizeof(char), cudaMemcpyHostToDevice) );
+
+    cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_window_size * sizeof(unsigned char)) );
+    cudaSafeCall( cudaMemset(d_prelim_results_indexes, '\0', reference_window_size * sizeof(unsigned int)) );
+    
+    ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_window_size, d_rvd_pairs + 0, rvd_lengths[0], cutoffs[0], c_upstream, 0, d_scoring_matrix, sm_pitch, d_prelim_results);
+    cudaSafeCall( cudaGetLastError() );
+
+    ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_window_size, d_rvd_pairs + PADDED_RVD_WIDTH, rvd_lengths[1], cutoffs[1], c_upstream, 1, d_scoring_matrix, sm_pitch, d_prelim_results);
+    cudaSafeCall( cudaGetLastError() );
+
+    cudaSafeCall( cudaMemcpy(prelim_results + copy_offset, d_prelim_results, copy_num * sizeof(unsigned char), cudaMemcpyDeviceToHost) );
+    cudaSafeCall( cudaGetLastError() );
+
+    thrust::sequence(prelim_results_indexes_start, prelim_results_indexes_end);
+    thrust::transform(prelim_results_start, prelim_results_end, prelim_results_indexes_start, prelim_results_indexes_start, index_to_keep(copy_offset));
+    thrust::sort(prelim_results_indexes_start, prelim_results_indexes_end, thrust::greater<int>());
+    thrust::device_ptr<int> keepers_end = thrust::min_element(prelim_results_indexes_start, prelim_results_indexes_end);
+
+    cudaSafeCall( cudaMemcpy(prelim_results_indexes + keepers_end_pos, d_prelim_results_indexes, (keepers_end - prelim_results_indexes_start) * sizeof(int), cudaMemcpyDeviceToHost) );
+    cudaSafeCall( cudaGetLastError() );
+
+    keepers_end_pos += (keepers_end - prelim_results_indexes_start);
+
+  }
+
+  return keepers_end_pos;
+
+}
+
+void RunPairedFindBindingSitesKeepScores_cleanup(char *d_reference_sequence, unsigned int *d_rvd_pairs, double *d_scoring_matrix, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes) {
+  cudaSafeCall( cudaFree(d_prelim_results) );
+  cudaSafeCall( cudaFree(d_prelim_results_indexes) );
+  cudaSafeCall( cudaFreeHost(prelim_results) );
+  cudaSafeCall( cudaFreeHost(prelim_results_indexes) );
+  cudaSafeCall( cudaFree(d_reference_sequence) );
+  cudaSafeCall( cudaFree(d_rvd_pairs) );
+  cudaSafeCall( cudaFree(d_scoring_matrix) );
+}
+
