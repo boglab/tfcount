@@ -188,20 +188,30 @@ struct valid_index
   }
 };
 
-void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_seqs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_seqs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
+void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_seqs, unsigned int *rvd_lengths, float *cutoffs, unsigned int num_rvd_seqs, int c_upstream, float **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
   
   unsigned int *d_rvd_seqs;
-  double *d_scoring_matrix;
+  float *d_scoring_matrix;
   size_t sm_pitch;
   
   cudaSafeCall( cudaMalloc(&d_rvd_seqs, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int)));
   cudaSafeCall( cudaMemcpy(d_rvd_seqs, rvd_seqs, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int), cudaMemcpyHostToDevice) );
   
-  cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(double), scoring_matrix_length * sizeof(double)) );
+  cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(float), scoring_matrix_length * sizeof(float)) );
   
   for (unsigned int i = 0; i < scoring_matrix_length; i++) {
-    cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(double) * 5, cudaMemcpyHostToDevice) );
+    cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(float) * 5, cudaMemcpyHostToDevice) );
   }
+  
+  cudaChannelFormatDesc channelDescSM = cudaCreateChannelDesc<float>();
+  size_t offset;
+
+  texRefSM.addressMode[0] = cudaAddressModeClamp;
+  texRefSM.addressMode[1] = cudaAddressModeClamp;
+  texRefSM.normalized = 0;
+  texRefSM.filterMode = cudaFilterModePoint;
+
+  cudaBindTexture2D(&offset, &texRefSM, d_scoring_matrix, &channelDescSM, 5, scoring_matrix_length, sm_pitch);
   
   dim3 score_threadsPerBlock(32, 14);
   
@@ -209,27 +219,32 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
 
   kseq_t *seq = kseq_init(seqfile);
   int result;
+  
+  unsigned char *d_prelim_results;
+  char *d_reference_sequence;
+  
+  cudaSafeCall( cudaMalloc(&d_reference_sequence, 320000000 * sizeof(char)) );
+  cudaSafeCall( cudaMalloc(&d_prelim_results, 320000000 * sizeof(unsigned char)) );
+  
+  cudaChannelFormatDesc channelDescRS = cudaCreateChannelDesc<unsigned int>();
+  texRefRS.addressMode[0] = cudaAddressModeClamp;
+  texRefRS.normalized = 0;
+  texRefRS.filterMode = cudaFilterModePoint;
 
+  cudaBindTexture(&offset, &texRefRS, d_rvd_seqs, &channelDescRS, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int));
+  
   while ((result = kseq_read(seq)) >= 0) {
-
-    unsigned char *d_prelim_results;
-    char *d_reference_sequence;
 
     char *reference_sequence = seq->seq.s;
     unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
-    
-    for (unsigned long i = seq->seq.l; i < reference_sequence_length - 1; i++) {
-      reference_sequence[i] = 'X';
-    }
+
+    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', 320000000 * sizeof(char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence + 320000000 - 1, '\0', 1 * sizeof(char)) );
+    cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
     
     reference_sequence[reference_sequence_length- 1] = '\0';
 
     logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
-
-    cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_sequence_length * sizeof(char)) );
-    cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
-
-    cudaSafeCall( cudaMalloc(&d_prelim_results, reference_sequence_length * sizeof(unsigned char)) );
     
     thrust::device_ptr<unsigned char> prelim_results_start(d_prelim_results);
     thrust::device_ptr<unsigned char> prelim_results_end(d_prelim_results + reference_sequence_length);
@@ -245,7 +260,7 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
       
       cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
       
-      ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, d_rvd_seqs + i * PADDED_RVD_WIDTH, rvd_lengths[i], cutoffs[i], c_upstream, 0, d_scoring_matrix, sm_pitch, d_prelim_results);
+      ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, i * PADDED_RVD_WIDTH, rvd_lengths[i], cutoffs[i], c_upstream, 0, d_prelim_results);
       cudaSafeCall( cudaGetLastError() );
       
       results[i] += thrust::count_if(prelim_results_start, prelim_results_end, first_t_or_c());
@@ -253,17 +268,21 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
 
       
     }
-
-    cudaSafeCall( cudaFree(d_prelim_results) );
-    cudaSafeCall( cudaFree(d_reference_sequence) );
     
   }
 
   kseq_destroy(seq);
   gzclose(seqfile);
   
+  cudaSafeCall( cudaUnbindTexture(texRefSM) );
+  cudaSafeCall( cudaUnbindTexture(texRefRS) );
+  
   cudaSafeCall( cudaFree(d_rvd_seqs) );
   cudaSafeCall( cudaFree(d_scoring_matrix) );
+  
+  cudaSafeCall( cudaFree(d_prelim_results) );
+  
+  cudaSafeCall( cudaFree(d_reference_sequence) );
   
 }
 
@@ -393,7 +412,7 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
       pair_final_results[3] += pair_temp_results[3];
       
     }
-  
+    
   }
 
   kseq_destroy(seq);
