@@ -32,7 +32,7 @@ cdef extern from "bcutils.h":
 
 cdef extern from "tfcount_cuda.h":
         void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_seqs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_seqs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results)
-        void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, double *cutoffs, unsigned int num_rvd_pairs, int c_upstream, double **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results)
+        void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *spacer_sizes, unsigned int *rvd_pairs, unsigned int *rvd_lengths, float *cutoffs, unsigned int num_rvd_pairs, int c_upstream, float **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results)
 
 cdef get_best_score(rvd_seq, Hashmap *rvdscores):
         
@@ -145,7 +145,7 @@ def PairedTargetFinderCountTask(char *seq_filename, char *log_filepath, int c_up
                 unsigned int num_pairs = len(rvd_pairs_list)
                 unsigned int *rvd_pairs = <unsigned int *> calloc(2 * PADDED_RVD_WIDTH * num_pairs, sizeof(unsigned int))
                 unsigned int *rvd_lens = <unsigned int *> calloc(2 * num_pairs, sizeof(unsigned int))
-                double *rvd_cutoffs = <double*> calloc(2 * num_pairs, sizeof(double))
+                float *rvd_cutoffs = <float*> calloc(2 * num_pairs, sizeof(float))
                 
                 unsigned int *spacer_sizes = [spacer_min, spacer_max]
                 unsigned int *count_results_array = <unsigned int *> calloc(4 * num_pairs, sizeof(unsigned int))
@@ -153,12 +153,14 @@ def PairedTargetFinderCountTask(char *seq_filename, char *log_filepath, int c_up
                 Array *empty_array = array_new()
                 Hashmap *diresidue_probabilities = get_diresidue_probabilities(empty_array, weight)
                 Hashmap *diresidue_scores = convert_probabilities_to_scores(diresidue_probabilities)
+                double *rvd_score_ptr
                 
         hashmap_delete(diresidue_probabilities, NULL)
         hashmap_add(diresidue_scores, "XX", double_array(0, 0, 0, 0, BIGGEST_RVD_SCORE_EVER))
         
         cdef:
-                double **scoring_matrix = <double**> calloc(hashmap_size(diresidue_scores), sizeof(double*))
+                float *scoring_matrix_bak = <float*> calloc(hashmap_size(diresidue_scores) * 5, sizeof(float))
+               float **scoring_matrix = <float**> calloc(hashmap_size(diresidue_scores), sizeof(float*))
         
         cdef char **diresidues = hashmap_keys(diresidue_scores)
         
@@ -166,7 +168,12 @@ def PairedTargetFinderCountTask(char *seq_filename, char *log_filepath, int c_up
         
         for i in range(hashmap_size(diresidue_scores)):
                 rvd_to_int[diresidues[i]] = i
-                scoring_matrix[i] = <double*> hashmap_get(diresidue_scores, diresidues[i])
+                rvd_score_ptr = <double*> hashmap_get(diresidue_scores, diresidues[i])
+                scoring_matrix[i] = scoring_matrix_bak+5*i
+                scoring_matrix[i][0] = <float> rvd_score_ptr[0]
+                scoring_matrix[i][1] = <float> rvd_score_ptr[1]
+                scoring_matrix[i][2] = <float> rvd_score_ptr[2]
+                scoring_matrix[i][3] = <float> rvd_score_ptr[3]
                 scoring_matrix[i][4] = BIGGEST_RVD_SCORE_EVER
         
         cdef unsigned int blank_rvd = rvd_to_int["XX"]
@@ -202,11 +209,11 @@ def PairedTargetFinderCountTask(char *seq_filename, char *log_filepath, int c_up
         
         RunPairedCountBindingSites(seq_filename, log_file, spacer_sizes, rvd_pairs, rvd_lens, rvd_cutoffs, num_pairs, c_upstream, scoring_matrix, hashmap_size(diresidue_scores), count_results_array)
         
-        
         if log_file != stdout:
                 fclose(log_file)
         
         free(scoring_matrix)
+        free(scoring_matrix_bak)
         free(diresidues)
         free(rvd_pairs)
         free(rvd_lens)
