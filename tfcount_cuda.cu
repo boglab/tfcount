@@ -575,10 +575,10 @@ void RunPairedFindBindingSitesKeepScores_cleanup(char *d_reference_sequence, uns
   cudaSafeCall( cudaFree(d_scoring_matrix) );
 }
 
-void RunFindBindingSitesKeepScores_init(unsigned int **d_rvd_seq_p, double **d_scoring_matrix_p, size_t *sm_pitch_p, unsigned char **d_prelim_results_p, int **d_prelim_results_indexes_p, char **d_reference_sequence_p, unsigned char **prelim_results_p, int **prelim_results_indexes_p, unsigned long *reference_window_size_p, int *score_block_x_p, int *score_block_y_p, unsigned int *rvd_seq, double **scoring_matrix, unsigned int rvd_length, unsigned int scoring_matrix_length) {
+void RunFindBindingSitesKeepScores_init(unsigned int **d_rvd_seq_p, float **d_scoring_matrix_p, unsigned char **d_prelim_results_p, int **d_prelim_results_indexes_p, char **d_reference_sequence_p, unsigned char **prelim_results_p, int **prelim_results_indexes_p, unsigned long *reference_window_size_p, int *score_block_x_p, int *score_block_y_p, unsigned int *rvd_seq, float **scoring_matrix, unsigned int rvd_length, unsigned int scoring_matrix_length) {
   
   unsigned int *d_rvd_seq;
-  double *d_scoring_matrix;
+  float *d_scoring_matrix;
   size_t sm_pitch;
   unsigned char *d_prelim_results;
   int *d_prelim_results_indexes;
@@ -593,11 +593,29 @@ void RunFindBindingSitesKeepScores_init(unsigned int **d_rvd_seq_p, double **d_s
   cudaSafeCall( cudaMalloc(&d_rvd_seq, 2 * PADDED_RVD_WIDTH * sizeof(unsigned int)));
   cudaSafeCall( cudaMemcpy(d_rvd_seq, rvd_seq, rvd_length * sizeof(unsigned int), cudaMemcpyHostToDevice) );
   
-  cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(double), scoring_matrix_length * sizeof(double)) );
+  cudaChannelFormatDesc channelDescRS = cudaCreateChannelDesc<unsigned int>();
+  size_t offset;
+  
+  texRefRS.addressMode[0] = cudaAddressModeClamp;
+  texRefRS.normalized = 0;
+  texRefRS.filterMode = cudaFilterModePoint;
+
+  cudaBindTexture(&offset, &texRefRS, d_rvd_seq, &channelDescRS, 2 * PADDED_RVD_WIDTH * sizeof(unsigned int));
+
+  cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(float), scoring_matrix_length * sizeof(float)) );
   
   for (unsigned int i = 0; i < scoring_matrix_length; i++) {
-    cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(double) * 5, cudaMemcpyHostToDevice) );
+    cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(float) * 5, cudaMemcpyHostToDevice) );
   }
+  
+  cudaChannelFormatDesc channelDescSM = cudaCreateChannelDesc<float>();
+
+  texRefSM.addressMode[0] = cudaAddressModeClamp;
+  texRefSM.addressMode[1] = cudaAddressModeClamp;
+  texRefSM.normalized = 0;
+  texRefSM.filterMode = cudaFilterModePoint;
+
+  cudaBindTexture2D(&offset, &texRefSM, d_scoring_matrix, &channelDescSM, 5, scoring_matrix_length, sm_pitch);
   
   cudaSafeCall( cudaMalloc(&d_reference_sequence, reference_window_size * sizeof(char)) );
   cudaSafeCall( cudaMalloc(&d_prelim_results, reference_window_size * sizeof(unsigned char)) );
@@ -613,7 +631,6 @@ void RunFindBindingSitesKeepScores_init(unsigned int **d_rvd_seq_p, double **d_s
   
   *d_rvd_seq_p = d_rvd_seq;
   *d_scoring_matrix_p = d_scoring_matrix;
-  *sm_pitch_p = sm_pitch;
   *d_prelim_results_p = d_prelim_results;
   *d_prelim_results_indexes_p = d_prelim_results_indexes;
   *prelim_results_p = prelim_results;
@@ -625,7 +642,7 @@ void RunFindBindingSitesKeepScores_init(unsigned int **d_rvd_seq_p, double **d_s
   
 }
 
-int RunFindBindingSitesKeepScores(char *d_reference_sequence, unsigned int *d_rvd_seq, double *d_scoring_matrix, size_t sm_pitch, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes, unsigned long reference_window_size, int score_block_x, int score_block_y, unsigned int rvd_length, char *ref_seq, unsigned long ref_seq_len, double cutoff, int c_upstream) {
+int RunFindBindingSitesKeepScores(char *d_reference_sequence, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes, unsigned long reference_window_size, int score_block_x, int score_block_y, unsigned int rvd_length, char *ref_seq, unsigned long ref_seq_len, float cutoff, int c_upstream) {
   
   dim3 score_threadsPerBlock(32, 14);
   dim3 score_blocksPerGrid(score_block_x, score_block_y);
@@ -661,7 +678,7 @@ int RunFindBindingSitesKeepScores(char *d_reference_sequence, unsigned int *d_rv
     cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_window_size * sizeof(unsigned char)) );
     cudaSafeCall( cudaMemset(d_prelim_results_indexes, '\0', reference_window_size * sizeof(unsigned int)) );
     
-    ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_window_size, d_rvd_seq, rvd_length, cutoff, c_upstream, 0, d_scoring_matrix, sm_pitch, d_prelim_results);
+    ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_window_size, 0, rvd_length, cutoff, c_upstream, 0, d_prelim_results);
     cudaSafeCall( cudaGetLastError() );
 
     cudaSafeCall( cudaMemcpy(prelim_results + copy_offset, d_prelim_results, copy_num * sizeof(unsigned char), cudaMemcpyDeviceToHost) );
@@ -683,7 +700,9 @@ int RunFindBindingSitesKeepScores(char *d_reference_sequence, unsigned int *d_rv
 
 }
 
-void RunFindBindingSitesKeepScores_cleanup(char *d_reference_sequence, unsigned int *d_rvd_seq, double *d_scoring_matrix, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes) {
+void RunFindBindingSitesKeepScores_cleanup(char *d_reference_sequence, unsigned int *d_rvd_seq, float *d_scoring_matrix, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes) {
+  cudaSafeCall( cudaUnbindTexture(texRefSM) );
+  cudaSafeCall( cudaUnbindTexture(texRefRS) );
   cudaSafeCall( cudaFree(d_prelim_results) );
   cudaSafeCall( cudaFree(d_prelim_results_indexes) );
   cudaSafeCall( cudaFreeHost(prelim_results) );
