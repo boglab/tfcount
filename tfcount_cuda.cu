@@ -33,6 +33,8 @@ KSEQ_INIT(gzFile, gzread)
 #define TALLY_THREADS_PER_BLOCK 768
 #define MAX_BLOCKS_PER_GRID 65535
 
+#define MAX_COUNT_REF_LEN 320000000
+
 #define PADDED_RVD_WIDTH 32
 
 #define cudaSafeCall(call){   \
@@ -223,8 +225,8 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
   unsigned char *d_prelim_results;
   char *d_reference_sequence;
   
-  cudaSafeCall( cudaMalloc(&d_reference_sequence, 320000000 * sizeof(char)) );
-  cudaSafeCall( cudaMalloc(&d_prelim_results, 320000000 * sizeof(unsigned char)) );
+  cudaSafeCall( cudaMalloc(&d_reference_sequence, MAX_COUNT_REF_LEN * sizeof(char)) );
+  cudaSafeCall( cudaMalloc(&d_prelim_results, MAX_COUNT_REF_LEN * sizeof(unsigned char)) );
   
   cudaChannelFormatDesc channelDescRS = cudaCreateChannelDesc<unsigned int>();
   texRefRS.addressMode[0] = cudaAddressModeClamp;
@@ -238,8 +240,8 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
     char *reference_sequence = seq->seq.s;
     unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
 
-    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', 320000000 * sizeof(char)) );
-    cudaSafeCall( cudaMemset(d_reference_sequence + 320000000 - 1, '\0', 1 * sizeof(char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', MAX_COUNT_REF_LEN * sizeof(char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence + MAX_COUNT_REF_LEN - 1, '\0', 1 * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
     
     logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
@@ -323,9 +325,9 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
   unsigned int *d_second_results;
   char *d_reference_sequence;
 
-  cudaSafeCall( cudaMalloc(&d_reference_sequence, 320000000 * sizeof(char)) );
-  cudaSafeCall( cudaMalloc(&d_prelim_results, 320000000 * sizeof(unsigned char)) );
-  cudaSafeCall( cudaMalloc(&d_second_results, 320000000 * sizeof(unsigned int)) );
+  cudaSafeCall( cudaMalloc(&d_reference_sequence, MAX_COUNT_REF_LEN * sizeof(char)) );
+  cudaSafeCall( cudaMalloc(&d_prelim_results, MAX_COUNT_REF_LEN * sizeof(unsigned char)) );
+  cudaSafeCall( cudaMalloc(&d_second_results, MAX_COUNT_REF_LEN * sizeof(unsigned int)) );
 
   cudaChannelFormatDesc channelDescRS = cudaCreateChannelDesc<unsigned int>();
   texRefRS.addressMode[0] = cudaAddressModeClamp;
@@ -339,8 +341,8 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
     char *reference_sequence = seq->seq.s;
     unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
 
-    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', 320000000 * sizeof(char)) );
-    cudaSafeCall( cudaMemset(d_reference_sequence + 320000000 - 1, '\0', 1 * sizeof(char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', MAX_COUNT_REF_LEN * sizeof(char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence + MAX_COUNT_REF_LEN - 1, '\0', 1 * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
     
     logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
