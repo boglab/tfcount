@@ -242,8 +242,6 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
     cudaSafeCall( cudaMemset(d_reference_sequence + 320000000 - 1, '\0', 1 * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
     
-    reference_sequence[reference_sequence_length- 1] = '\0';
-
     logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
     
     thrust::device_ptr<unsigned char> prelim_results_start(d_prelim_results);
@@ -345,8 +343,6 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
     cudaSafeCall( cudaMemset(d_reference_sequence + 320000000 - 1, '\0', 1 * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
     
-    reference_sequence[reference_sequence_length- 1] = '\0';
-
     logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
     
     thrust::device_ptr<unsigned int> second_results_start(d_second_results);
