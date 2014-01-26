@@ -235,7 +235,9 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
 
   cudaBindTexture(&offset, &texRefRS, d_rvd_seqs, &channelDescRS, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int));
   
-  while ((result = kseq_read(seq)) >= 0) {
+  result = kseq_read(seq);
+
+  while (result >= 0) {
 
     char *reference_sequence = seq->seq.s;
     unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
@@ -261,6 +263,8 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
       cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
       
       ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, i * PADDED_RVD_WIDTH, rvd_lengths[i], cutoffs[i], c_upstream, 0, d_prelim_results);
+      if (i == 0) result = kseq_read(seq);
+
       cudaSafeCall( cudaGetLastError() );
       
       results[i] += thrust::count_if(prelim_results_start, prelim_results_end, first_t_or_c());
@@ -336,7 +340,9 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
 
   cudaBindTexture(&offset, &texRefRS, d_rvd_pairs, &channelDescRS, 2 * PADDED_RVD_WIDTH * num_rvd_pairs * sizeof(unsigned int));
 
-  while ((result = kseq_read(seq)) >= 0) {
+  result = kseq_read(seq);
+
+  while (result >= 0) {
 
     char *reference_sequence = seq->seq.s;
     unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
@@ -376,6 +382,7 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
       int second_index = first_index + 1;
 
       ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, first_index * PADDED_RVD_WIDTH, rvd_lengths[first_index], cutoffs[first_index], c_upstream, 0, d_prelim_results);
+      if (i == 0) result = kseq_read(seq);
       cudaSafeCall( cudaGetLastError() );
 
       ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, second_index * PADDED_RVD_WIDTH, rvd_lengths[second_index], cutoffs[second_index], c_upstream, 1, d_prelim_results);
