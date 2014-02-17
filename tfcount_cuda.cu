@@ -29,8 +29,8 @@ extern "C" {
 KSEQ_INIT(gzFile, gzread)
 
 #define MAX_THREADS_PER_BLOCK 1024
-#define SCORE_THREADS_PER_BLOCK 448
-#define TALLY_THREADS_PER_BLOCK 768
+#define SCORE_THREADS_PER_BLOCK 512
+#define TALLY_THREADS_PER_BLOCK 512
 #define MAX_BLOCKS_PER_GRID 65535
 
 #define MAX_COUNT_REF_LEN 320000000
@@ -215,7 +215,7 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
 
   cudaBindTexture2D(&offset, &texRefSM, d_scoring_matrix, &channelDescSM, 5, scoring_matrix_length, sm_pitch);
   
-  dim3 score_threadsPerBlock(32, 14);
+  dim3 score_threadsPerBlock(32, 16);
   
   gzFile seqfile = gzopen(seq_filename, "r");
 
@@ -317,8 +317,8 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
 
   cudaBindTexture2D(&offset, &texRefSM, d_scoring_matrix, &channelDescSM, 5, scoring_matrix_length, sm_pitch);
   
-  dim3 score_threadsPerBlock(32, 14);
-  dim3 tally_threadsPerBlock(32, 24);
+  dim3 score_threadsPerBlock(32, 16);
+  dim3 tally_threadsPerBlock(32, 16);
   
   gzFile seqfile = gzopen(seq_filename, "r");
 
@@ -508,7 +508,7 @@ void RunPairedFindBindingSitesKeepScores_init(unsigned int **d_rvd_pair_p, float
 
 int RunPairedFindBindingSitesKeepScores(char *d_reference_sequence, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes, unsigned long reference_window_size, int score_block_x, int score_block_y, unsigned int *rvd_lengths, char *ref_seq, unsigned long ref_seq_len, float *cutoffs, int c_upstream) {
   
-  dim3 score_threadsPerBlock(32, 14);
+  dim3 score_threadsPerBlock(32, 16);
   dim3 score_blocksPerGrid(score_block_x, score_block_y);
   
   thrust::device_ptr<int> prelim_results_indexes_start(d_prelim_results_indexes);
@@ -649,7 +649,7 @@ void RunFindBindingSitesKeepScores_init(unsigned int **d_rvd_seq_p, float **d_sc
 
 int RunFindBindingSitesKeepScores(char *d_reference_sequence, unsigned char *d_prelim_results, int *d_prelim_results_indexes, unsigned char *prelim_results, int *prelim_results_indexes, unsigned long reference_window_size, int score_block_x, int score_block_y, unsigned int rvd_length, char *ref_seq, unsigned long ref_seq_len, float cutoff, int c_upstream) {
   
-  dim3 score_threadsPerBlock(32, 14);
+  dim3 score_threadsPerBlock(32, 16);
   dim3 score_blocksPerGrid(score_block_x, score_block_y);
   
   thrust::device_ptr<int> prelim_results_indexes_start(d_prelim_results_indexes);
