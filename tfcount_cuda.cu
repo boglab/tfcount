@@ -25,7 +25,7 @@ extern "C" {
 
 // Sequence handling
 #include <zlib.h>
-#include <bcutils/kseq.h>
+#include <bcutils/kseq_cuda.h>
 KSEQ_INIT(gzFile, gzread)
 
 #define MAX_THREADS_PER_BLOCK 1024
@@ -61,29 +61,16 @@ __global__ void ScoreBindingSites(const char * __restrict__ input_sequence, unsi
   char first = input_sequence[seq_index - 1];
   char last  = input_sequence[seq_index + rs_len];
 
-  int first_t = c_upstream != 1 && (first == 'T' || first == 't');
-  int first_c = c_upstream != 0 && (first == 'C' || first == 'c');
-  int last_a  = c_upstream != 1 && (last == 'A' || last == 'a');
-  int last_g  = c_upstream != 0 && (last == 'G' || last == 'g');
+  if (first == 4 and last == 4) return;
 
-
-  float thread_result_t = 0;
-  float thread_result_a = 0;
+  float thread_result_t = 0.0f;
+  float thread_result_a = 0.0f;
 
   for (int i = 0; i < rs_len; i++) {
 
-    int sm_col_t = 4;
+    if (thread_result_t > cutoff && thread_result_a > cutoff) continue;
 
-    char base = input_sequence[seq_index + i];
-
-    if (base == 'A' || base == 'a')
-      sm_col_t = 0;
-    if (base == 'C' || base == 'c')
-      sm_col_t = 1;
-    if (base == 'G' || base == 'g')
-      sm_col_t = 2;
-    if (base == 'T' || base == 't')
-      sm_col_t = 3;
+    int sm_col_t = input_sequence[seq_index + i];
 
     thread_result_t += tex2D(texRefSM, sm_col_t, tex1Dfetch(texRefRS, rvd_offset + i));
 
@@ -93,10 +80,13 @@ __global__ void ScoreBindingSites(const char * __restrict__ input_sequence, unsi
 
   }
 
-  results[seq_index] |= (thread_result_t < cutoff && (first_c || first_t) ? 1UL : 0UL) << ((2 * rvd_num) + (first_c * 4));
+  int first_t = c_upstream != 1 && first == 3;
+  int first_c = c_upstream != 0 && first == 1;
+  int last_a  = c_upstream != 1 && last == 0;
+  int last_g  = c_upstream != 0 && last == 2;
 
-  results[seq_index] |= (thread_result_a < cutoff && (last_g || last_a) ? 1UL : 0UL) << ((2 * rvd_num + 1) + (last_g * 4));
-
+  results[seq_index] |= (thread_result_t < cutoff && (first_c || first_t)) << ((2 * rvd_num) + (first_c * 4));
+  results[seq_index] |= (thread_result_a < cutoff && (last_g || last_a)) << ((2 * rvd_num + 1) + (last_g * 4));
 
 }
 
@@ -190,18 +180,38 @@ struct valid_index
   }
 };
 
+struct chars_to_smcols
+{
+  __host__ __device__ char operator()(const char &x) {
+    if( x == 'A' || x == 'a')
+      return 0;
+    if( x == 'C' || x == 'c')
+      return 1;
+    if( x == 'G' || x == 'g')
+      return 2;
+    if( x == 'T' || x == 't')
+      return 3;
+    return 4;
+  }
+};
+
 void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_seqs, unsigned int *rvd_lengths, float *cutoffs, unsigned int num_rvd_seqs, int c_upstream, float **scoring_matrix, unsigned int scoring_matrix_length, unsigned int *results) {
   
   unsigned int *d_rvd_seqs;
   float *d_scoring_matrix;
   size_t sm_pitch;
   
+  char *reference_buffer;
+  size_t reference_buffer_len = MAX_COUNT_REF_LEN;
+  kroundup32(reference_buffer_len);
+  cudaSafeCall( cudaMallocHost(&reference_buffer, reference_buffer_len * sizeof(char)) );
+  
   cudaSafeCall( cudaMalloc(&d_rvd_seqs, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int)));
   cudaSafeCall( cudaMemcpy(d_rvd_seqs, rvd_seqs, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int), cudaMemcpyHostToDevice) );
   
   cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(float), scoring_matrix_length * sizeof(float)) );
   
-  for (unsigned int i = 0; i < scoring_matrix_length; i++) {
+  for (int i = 0; i < scoring_matrix_length; i++) {
     cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(float) * 5, cudaMemcpyHostToDevice) );
   }
   
@@ -235,17 +245,22 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
 
   cudaBindTexture(&offset, &texRefRS, d_rvd_seqs, &channelDescRS, PADDED_RVD_WIDTH * num_rvd_seqs * sizeof(unsigned int));
   
-  result = kseq_read(seq);
+  result = kseq_read(seq, reference_buffer, reference_buffer_len);
 
   while (result >= 0) {
 
     char *reference_sequence = seq->seq.s;
     unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
 
-    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', MAX_COUNT_REF_LEN * sizeof(char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence, 4, MAX_COUNT_REF_LEN * sizeof(char)) );
     cudaSafeCall( cudaMemset(d_reference_sequence + MAX_COUNT_REF_LEN - 1, '\0', 1 * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
     
+    thrust::device_ptr<char> reference_sequence_start(d_reference_sequence);
+    thrust::device_ptr<char> reference_sequence_end(d_reference_sequence + reference_sequence_length);
+
+    thrust::transform(reference_sequence_start, reference_sequence_end, reference_sequence_start, chars_to_smcols());
+
     logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
     
     thrust::device_ptr<unsigned char> prelim_results_start(d_prelim_results);
@@ -263,7 +278,7 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
       cudaSafeCall( cudaMemset(d_prelim_results, '\0', reference_sequence_length * sizeof(unsigned char)) );
       
       ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, i * PADDED_RVD_WIDTH, rvd_lengths[i], cutoffs[i], c_upstream, 0, d_prelim_results);
-      if (i == 0) result = kseq_read(seq);
+      if (i == 0) result = kseq_read(seq, reference_buffer, reference_buffer_len);
 
       cudaSafeCall( cudaGetLastError() );
       
@@ -275,11 +290,13 @@ void RunCountBindingSites(char *seq_filename, FILE *log_file, unsigned int *rvd_
     
   }
 
-  kseq_destroy(seq);
+  kseq_destroy(seq, reference_buffer);
   gzclose(seqfile);
   
   cudaSafeCall( cudaUnbindTexture(texRefSM) );
   cudaSafeCall( cudaUnbindTexture(texRefRS) );
+  
+  cudaSafeCall( cudaFreeHost(reference_buffer) );
   
   cudaSafeCall( cudaFree(d_rvd_seqs) );
   cudaSafeCall( cudaFree(d_scoring_matrix) );
@@ -296,14 +313,17 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
   float *d_scoring_matrix;
   size_t sm_pitch;
   
-  cudaSafeCall( cudaFuncSetCacheConfig(ScoreBindingSites, cudaFuncCachePreferL1) );
-  
+  char *reference_buffer;
+  size_t reference_buffer_len = MAX_COUNT_REF_LEN;
+  kroundup32(reference_buffer_len);
+  cudaSafeCall( cudaMallocHost(&reference_buffer, reference_buffer_len * sizeof(char)) );
+
   cudaSafeCall( cudaMalloc(&d_rvd_pairs, 2 * PADDED_RVD_WIDTH * num_rvd_pairs * sizeof(unsigned int)));
   cudaSafeCall( cudaMemcpy(d_rvd_pairs, rvd_pairs, 2 * PADDED_RVD_WIDTH * num_rvd_pairs * sizeof(unsigned int), cudaMemcpyHostToDevice) );
   
   cudaSafeCall( cudaMallocPitch(&d_scoring_matrix, &sm_pitch, 5 * sizeof(float), scoring_matrix_length * sizeof(float)) );
   
-  for (unsigned int i = 0; i < scoring_matrix_length; i++) {
+  for (int i = 0; i < scoring_matrix_length; i++) {
     cudaSafeCall( cudaMemcpy(ScoringMatrixRow(d_scoring_matrix, sm_pitch, i), scoring_matrix[i], sizeof(float) * 5, cudaMemcpyHostToDevice) );
   }
   
@@ -340,16 +360,21 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
 
   cudaBindTexture(&offset, &texRefRS, d_rvd_pairs, &channelDescRS, 2 * PADDED_RVD_WIDTH * num_rvd_pairs * sizeof(unsigned int));
 
-  result = kseq_read(seq);
+  result = kseq_read(seq, reference_buffer, reference_buffer_len);
 
   while (result >= 0) {
 
     char *reference_sequence = seq->seq.s;
-    unsigned long reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
+    int reference_sequence_length = ((seq->seq.l + 31) / 32 ) * 32;
 
-    cudaSafeCall( cudaMemset(d_reference_sequence, 'X', MAX_COUNT_REF_LEN * sizeof(char)) );
+    cudaSafeCall( cudaMemset(d_reference_sequence, 4, MAX_COUNT_REF_LEN * sizeof(char)) );
     cudaSafeCall( cudaMemset(d_reference_sequence + MAX_COUNT_REF_LEN - 1, '\0', 1 * sizeof(char)) );
     cudaSafeCall( cudaMemcpy(d_reference_sequence, reference_sequence, reference_sequence_length * sizeof(char), cudaMemcpyHostToDevice) );
+    
+    thrust::device_ptr<char> reference_sequence_start(d_reference_sequence);
+    thrust::device_ptr<char> reference_sequence_end(d_reference_sequence + reference_sequence_length);
+
+    thrust::transform(reference_sequence_start, reference_sequence_end, reference_sequence_start, chars_to_smcols());
     
     logger(log_file, "Scanning %s for off-target sites (length %ld)", seq->name.s, seq->seq.l);
     
@@ -382,7 +407,7 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
       int second_index = first_index + 1;
 
       ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, first_index * PADDED_RVD_WIDTH, rvd_lengths[first_index], cutoffs[first_index], c_upstream, 0, d_prelim_results);
-      if (i == 0) result = kseq_read(seq);
+      if (i == 0) result = kseq_read(seq, reference_buffer, reference_buffer_len);
       cudaSafeCall( cudaGetLastError() );
 
       ScoreBindingSites <<<score_blocksPerGrid, score_threadsPerBlock>>>(d_reference_sequence, reference_sequence_length, second_index * PADDED_RVD_WIDTH, rvd_lengths[second_index], cutoffs[second_index], c_upstream, 1, d_prelim_results);
@@ -420,11 +445,13 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
     
   }
 
-  kseq_destroy(seq);
+  kseq_destroy(seq, reference_buffer);
   gzclose(seqfile);
   
   cudaSafeCall( cudaUnbindTexture(texRefSM) );
   cudaSafeCall( cudaUnbindTexture(texRefRS) );
+  
+  cudaSafeCall( cudaFreeHost(reference_buffer) );
 
   cudaSafeCall( cudaFree(d_rvd_pairs) );
   cudaSafeCall( cudaFree(d_scoring_matrix) );
@@ -438,6 +465,8 @@ void RunPairedCountBindingSites(char *seq_filename, FILE *log_file, unsigned int
   
 }
 
+
+#ifdef BTFCOUNT_TFCOUNT_SINGLE
 void RunPairedFindBindingSitesKeepScores_init(unsigned int **d_rvd_pair_p, float **d_scoring_matrix_p, unsigned char **d_prelim_results_p, int **d_prelim_results_indexes_p, char **d_reference_sequence_p, unsigned char **prelim_results_p, int **prelim_results_indexes_p, unsigned long *reference_window_size_p, int *score_block_x_p, int *score_block_y_p, unsigned int **rvd_pair, float **scoring_matrix, unsigned int *rvd_lengths, unsigned int scoring_matrix_length) {
   
   unsigned int *d_rvd_pair;
@@ -717,4 +746,4 @@ void RunFindBindingSitesKeepScores_cleanup(char *d_reference_sequence, unsigned 
   cudaSafeCall( cudaFree(d_scoring_matrix) );
 }
 
-
+#endif
