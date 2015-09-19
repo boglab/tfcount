@@ -2,7 +2,7 @@
 
 All source code is available under an ISC license.
 
-Copyright (c) 2012, Nick Booher <njbooher@gmail.com>.
+Copyright (c) 2012-2015, Nick Booher <njbooher@gmail.com>.
 
 Permission to use, copy, modify, and/or distribute this software for any
 purpose with or without fee is hereby granted, provided that the above
