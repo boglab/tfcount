@@ -22,7 +22,7 @@ tfcount is a library for quickly counting the number of predicted binding sites 
 
 # Dependencies
 
-To use tfcount you will need an NVIDIA GPU of compute capability 2.0+ ([see this list of NVIDIA GPUs](https://developer.nvidia.com/cuda-gpus)) and CUDA Toolkit 4.2+, [libbcutils](https://github.com/boglab/cutils), Python 2.6+, and [cython](http://pypi.python.org/pypi/Cython).
+To use tfcount you will need an NVIDIA GPU of compute capability 3.0+ ([see this list of NVIDIA GPUs](https://developer.nvidia.com/cuda-gpus)) and CUDA Toolkit 7.5+, [libbcutils](https://github.com/boglab/cutils), Python 2.6+, and [cython](http://pypi.python.org/pypi/Cython).
 
 # Compilation Directions
 
