@@ -26,7 +26,7 @@ To use tfcount you will need an NVIDIA GPU of compute capability 2.0+ ([see this
 
 # Compilation Directions
 
-The makefile assumes the CUDA toolkit is installed in `/opt/cuda-toolkit`. You will need to change the paths in the makefile if this is not the case.
+The makefile assumes CUDA is installed in `/opt/cuda`. You will need to change the paths in the makefile if this is not the case.
 
 Run from the directory containing this file:
 ```
